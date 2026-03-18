@@ -12,9 +12,6 @@ export interface DocumentMapping<TState> {
   /** Sanity document type (e.g. "message") */
   documentType: string
 
-  /** GROQ projection for fetching (e.g. `{ ..., customFonts[]-> }`) */
-  projection?: string
-
   /** Convert a Sanity document to the app's in-memory state */
   fromSanity(doc: Record<string, unknown>): TState
 
@@ -23,4 +20,22 @@ export interface DocumentMapping<TState> {
 
   /** Apply a mutation to app state. Returns new state, or null if invalid. */
   applyMutation(state: TState, mutation: Mutation): TState | null
+
+  /**
+   * Discover referenced document IDs to auto-subscribe.
+   * Called when the main document changes. The Room diffs against current
+   * subscriptions and adds/removes bridges as needed. All refs share the
+   * same SDK shared listener — zero extra connections.
+   */
+  resolveRefs?(doc: Record<string, unknown>): RefDescriptor[]
+}
+
+/** Describes a referenced document to auto-follow. */
+export interface RefDescriptor {
+  /** Stable key for diffing (e.g. "cf-font123") */
+  key: string
+  /** Sanity document ID */
+  docId: string
+  /** Mapping for the referenced document */
+  mapping: DocumentMapping<unknown>
 }

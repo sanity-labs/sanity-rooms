@@ -36,6 +36,8 @@ export interface SanityBridgeOptions<TState> {
   mapping: DocumentMapping<TState>
   initialState: TState
   onStateChange: (state: TState) => void
+  /** Called with the raw Sanity doc on every change (for resolveRefs). */
+  onRawDoc?: (doc: Record<string, unknown>) => void
 }
 
 export class SanityBridge<TState> {
@@ -44,6 +46,7 @@ export class SanityBridge<TState> {
   private readonly adapter: SdkAdapter
   private readonly docId: string
   private readonly onStateChange: (state: TState) => void
+  private readonly onRawDoc?: (doc: Record<string, unknown>) => void
   private unsubscribe: (() => void) | null = null
 
   constructor(options: SanityBridgeOptions<TState>) {
@@ -52,6 +55,7 @@ export class SanityBridge<TState> {
     this.mapping = options.mapping
     this.state = options.initialState
     this.onStateChange = options.onStateChange
+    this.onRawDoc = options.onRawDoc
 
     this.unsubscribe = this.adapter.subscribe(
       this.docId,
@@ -61,6 +65,7 @@ export class SanityBridge<TState> {
         const mapped = this.mapping.fromSanity(doc)
         this.state = mapped
         this.onStateChange(mapped)
+        this.onRawDoc?.(doc)
       },
     )
   }

@@ -5,12 +5,9 @@
  * N connected clients (each with a ServerTransport), and app-defined
  * channels for concerns like chat or presence.
  *
- * When a client mutates a document, the Room:
- * 1. Applies the mutation via the SanityBridge (optimistic on Sanity)
- * 2. Broadcasts the updated state to ALL connected clients
- * 3. Sends an ack to the originating client
- *
- * When Sanity pushes an external change, the Room broadcasts to all clients.
+ * Supports dynamic ref-following: when a document's mapping has `resolveRefs`,
+ * the Room auto-subscribes to referenced docs and broadcasts their state.
+ * All refs share the SDK's single shared listener — zero extra connections.
  */
 
 import type { ServerTransport } from '../transport'
@@ -55,28 +52,19 @@ export class Room {
   private graceTimer: ReturnType<typeof setTimeout> | null = null
   private gracePeriodMs: number
   private disposed = false
+  private adapter: SdkAdapter
+
+  // Ref-following: tracks which ref bridges belong to which parent doc
+  private refBridges = new Map<string, Map<string, SanityBridge<unknown>>>() // parentKey → (refKey → bridge)
 
   onEmpty: (() => void) | null = null
 
   constructor(config: RoomConfig, adapter: SdkAdapter) {
+    this.adapter = adapter
     this.gracePeriodMs = config.gracePeriodMs ?? 30_000
 
     for (const [key, docConfig] of Object.entries(config.documents)) {
-      const bridge = new SanityBridge({
-        adapter,
-        docId: docConfig.docId,
-        mapping: docConfig.mapping,
-        initialState: docConfig.initialState,
-        onStateChange: (state) => {
-          // External edit from Sanity — broadcast to all clients
-          this.broadcastAll({
-            channel: docChannel(key),
-            type: 'state',
-            state,
-          })
-        },
-      })
-      this.bridges.set(key, bridge)
+      this.createDocBridge(key, docConfig)
     }
   }
 
@@ -99,13 +87,22 @@ export class Room {
 
     this.clients.set(clientId, { transport, unsubMessage, unsubClose })
 
-    // Send current state for all documents
+    // Send current state for all documents (primary + refs)
     for (const [key, bridge] of this.bridges) {
       this.sendTo(clientId, {
         channel: docChannel(key),
         type: 'state',
         state: bridge.getState(),
       })
+    }
+    for (const [, refMap] of this.refBridges) {
+      for (const [refKey, bridge] of refMap) {
+        this.sendTo(clientId, {
+          channel: docChannel(refKey),
+          type: 'state',
+          state: bridge.getState(),
+        })
+      }
     }
 
     // Notify app channels
@@ -146,8 +143,13 @@ export class Room {
 
   getDocState<T = unknown>(docKey: string): T {
     const bridge = this.bridges.get(docKey)
-    if (!bridge) throw new Error(`Unknown document key: ${docKey}`)
-    return bridge.getState() as T
+    if (bridge) return bridge.getState() as T
+    // Check ref bridges
+    for (const [, refMap] of this.refBridges) {
+      const refBridge = refMap.get(docKey)
+      if (refBridge) return refBridge.getState() as T
+    }
+    throw new Error(`Unknown document key: ${docKey}`)
   }
 
   mutateDoc(docKey: string, mutation: Mutation): void {
@@ -199,6 +201,11 @@ export class Room {
     }
     this.bridges.clear()
 
+    for (const [, refMap] of this.refBridges) {
+      for (const bridge of refMap.values()) bridge.dispose()
+    }
+    this.refBridges.clear()
+
     for (const client of this.clients.values()) {
       client.unsubMessage()
       client.unsubClose()
@@ -210,7 +217,76 @@ export class Room {
     this.onEmpty?.()
   }
 
-  // ── Internal ──────────────────────────────────────────────────────────
+  // ── Internal: bridge creation ─────────────────────────────────────────
+
+  private createDocBridge(key: string, docConfig: RoomDocConfig): void {
+    const bridge = new SanityBridge({
+      adapter: this.adapter,
+      docId: docConfig.docId,
+      mapping: docConfig.mapping,
+      initialState: docConfig.initialState,
+      onStateChange: (state) => {
+        this.broadcastAll({
+          channel: docChannel(key),
+          type: 'state',
+          state,
+        })
+      },
+      onRawDoc: docConfig.mapping.resolveRefs
+        ? (doc) => this.updateRefs(key, docConfig.mapping, doc)
+        : undefined,
+    })
+    this.bridges.set(key, bridge)
+  }
+
+  // ── Internal: ref following ───────────────────────────────────────────
+
+  private updateRefs(
+    parentKey: string,
+    mapping: DocumentMapping<unknown>,
+    rawDoc: Record<string, unknown>,
+  ): void {
+    if (!mapping.resolveRefs) return
+
+    const desired = mapping.resolveRefs(rawDoc)
+    const desiredKeys = new Map(desired.map((r) => [r.key, r]))
+
+    let current = this.refBridges.get(parentKey)
+    if (!current) {
+      current = new Map()
+      this.refBridges.set(parentKey, current)
+    }
+
+    // Remove stale refs
+    for (const [refKey, bridge] of current) {
+      if (!desiredKeys.has(refKey)) {
+        bridge.dispose()
+        current.delete(refKey)
+      }
+    }
+
+    // Add new refs
+    for (const [refKey, desc] of desiredKeys) {
+      if (!current.has(refKey)) {
+        const refBridge = new SanityBridge({
+          adapter: this.adapter,
+          docId: desc.docId,
+          mapping: desc.mapping,
+          initialState: {},
+          onStateChange: (state) => {
+            this.broadcastAll({
+              channel: docChannel(refKey),
+              type: 'state',
+              state,
+            })
+          },
+        })
+        current.set(refKey, refBridge)
+      }
+    }
+  }
+
+  // ── Internal: message handling ────────────────────────────────────────
 
   private handleClientMsg(clientId: string, msg: ClientMsg): void {
     const parsed = parseChannel(msg.channel)

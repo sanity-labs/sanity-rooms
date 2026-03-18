@@ -287,4 +287,191 @@ describe('Room', () => {
 
     await room.dispose()
   })
+
+  // ── Ref following ──────────────────────────────────────────────────────
+
+  it('resolveRefs: auto-subscribes to referenced docs', async () => {
+    const mock = createMockSanity({
+      'main-doc': { value: 1, refs: [{ _ref: 'ref-a' }, { _ref: 'ref-b' }] },
+      'ref-a': { name: 'Font A' },
+      'ref-b': { name: 'Palette B' },
+    })
+
+    const refMapping: DocumentMapping<Record<string, unknown>> = {
+      documentType: 'asset',
+      fromSanity(doc) { return doc },
+      toSanityPatch(state) { return state },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
+      },
+    }
+
+    const parentMapping: DocumentMapping<{ value: number }> = {
+      documentType: 'test',
+      fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
+      toSanityPatch(state) { return { value: state.value } },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as { value: number } : null
+      },
+      resolveRefs(doc) {
+        return ((doc.refs ?? []) as any[]).map((r: any) => ({
+          key: `ref-${r._ref}`,
+          docId: r._ref,
+          mapping: refMapping,
+        }))
+      },
+    }
+
+    const room = new Room(
+      {
+        documents: {
+          main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
+        },
+      },
+      mock.adapter,
+    )
+
+    // Wait for initial subscriptions to fire
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const c1 = connectClient(room)
+    await flushMicrotasks()
+
+    // Client should receive state for main doc AND ref docs
+    const mainState = c1.received.find((m) => m.type === 'state' && (m as any).channel === 'doc:main')
+    expect(mainState).toBeDefined()
+
+    const refAState = c1.received.find((m) => m.type === 'state' && (m as any).channel === 'doc:ref-ref-a')
+    expect(refAState).toBeDefined()
+    expect((refAState as any).state).toHaveProperty('name', 'Font A')
+
+    const refBState = c1.received.find((m) => m.type === 'state' && (m as any).channel === 'doc:ref-ref-b')
+    expect(refBState).toBeDefined()
+    expect((refBState as any).state).toHaveProperty('name', 'Palette B')
+
+    await room.dispose()
+  })
+
+  it('resolveRefs: updates subscriptions when refs change', async () => {
+    const mock = createMockSanity({
+      'main-doc': { value: 1, refs: [{ _ref: 'ref-a' }] },
+      'ref-a': { name: 'A' },
+      'ref-c': { name: 'C' },
+    })
+
+    const refMapping: DocumentMapping<Record<string, unknown>> = {
+      documentType: 'asset',
+      fromSanity(doc) { return doc },
+      toSanityPatch(state) { return state },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
+      },
+    }
+
+    const parentMapping: DocumentMapping<{ value: number }> = {
+      documentType: 'test',
+      fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
+      toSanityPatch(state) { return { value: state.value } },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as { value: number } : null
+      },
+      resolveRefs(doc) {
+        return ((doc.refs ?? []) as any[]).map((r: any) => ({
+          key: `ref-${r._ref}`,
+          docId: r._ref,
+          mapping: refMapping,
+        }))
+      },
+    }
+
+    const room = new Room(
+      {
+        documents: {
+          main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
+        },
+      },
+      mock.adapter,
+    )
+
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const c1 = connectClient(room)
+    await flushMicrotasks()
+    c1.received.length = 0
+
+    // Simulate main doc changing refs: remove ref-a, add ref-c
+    mock.simulateExternalEdit('main-doc', { value: 2, refs: [{ _ref: 'ref-c' }] })
+    await flushMicrotasks()
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // Client should get new ref-c state
+    const refCState = c1.received.find((m) => m.type === 'state' && (m as any).channel === 'doc:ref-ref-c')
+    expect(refCState).toBeDefined()
+    expect((refCState as any).state).toHaveProperty('name', 'C')
+
+    await room.dispose()
+  })
+
+  it('resolveRefs: external edit on ref doc broadcasts to clients', async () => {
+    const mock = createMockSanity({
+      'main-doc': { value: 1, refs: [{ _ref: 'ref-a' }] },
+      'ref-a': { name: 'Original' },
+    })
+
+    const refMapping: DocumentMapping<Record<string, unknown>> = {
+      documentType: 'asset',
+      fromSanity(doc) { return doc },
+      toSanityPatch(state) { return state },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
+      },
+    }
+
+    const parentMapping: DocumentMapping<{ value: number }> = {
+      documentType: 'test',
+      fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
+      toSanityPatch(state) { return { value: state.value } },
+      applyMutation(_state, mutation) {
+        return mutation.kind === 'replace' ? mutation.state as { value: number } : null
+      },
+      resolveRefs(doc) {
+        return ((doc.refs ?? []) as any[]).map((r: any) => ({
+          key: `ref-${r._ref}`,
+          docId: r._ref,
+          mapping: refMapping,
+        }))
+      },
+    }
+
+    const room = new Room(
+      {
+        documents: {
+          main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
+        },
+      },
+      mock.adapter,
+    )
+
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const c1 = connectClient(room)
+    await flushMicrotasks()
+    c1.received.length = 0
+
+    // External edit on ref doc
+    mock.simulateExternalEdit('ref-a', { name: 'Updated' })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const refUpdate = c1.received.find(
+      (m) => m.type === 'state' && (m as any).channel === 'doc:ref-ref-a' && (m as any).state?.name === 'Updated',
+    )
+    expect(refUpdate).toBeDefined()
+
+    await room.dispose()
+  })
 })
