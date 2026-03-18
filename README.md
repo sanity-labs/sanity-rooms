@@ -1,5 +1,8 @@
 # sanity-rooms
 
+> **⚠️ Proof of Concept — Work in Progress**
+> This is an early-stage experiment, 100% vibecoded. APIs will change. Not production-ready.
+
 Transport-agnostic, optimistic document synchronization for Sanity. Provides multi-client rooms with real-time broadcast, a document mapping layer, and app-defined channels — on top of `@sanity/sdk`'s listener and conflict resolution infrastructure.
 
 ## What this is
