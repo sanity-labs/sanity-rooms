@@ -47,6 +47,7 @@ export class SanityBridge {
     // Strip drafts. prefix — the SDK manages draft lifecycle internally
     this.docId = options.docId.replace(/^drafts\./, '')
     this.documentType = options.documentType
+    console.log(`[bridge] created: ${this.docId} (${this.documentType})`)
     this.onChange = options.onChange
 
     const handle = createDocumentHandle({
@@ -81,15 +82,29 @@ export class SanityBridge {
     refDocs?: Array<{ docId: string; documentType: string; content: Record<string, unknown> }>,
     transactionId?: string,
   ): void {
+    console.log(`[bridge:${this.docId}] write: ready=${this.ready} keys=${Object.keys(patch)} refDocs=${refDocs?.length ?? 0} txn=${transactionId}`)
     // Buffer writes until SDK state is ready (grants loaded, doc fetched)
     if (!this.ready) {
       this.pendingWrites.push({ patch, refDocs, transactionId })
       return
     }
 
+    // Build all actions in one batch — atomic transaction
     const actions: any[] = []
 
-    // Main doc edit
+    // Ref doc creates (in same atomic transaction as main doc edit)
+    if (refDocs) {
+      for (const ref of refDocs) {
+        const refHandle = createDocumentTypeHandle({
+          documentId: ref.docId,
+          documentType: ref.documentType,
+          ...this.resource,
+        })
+        actions.push(createDocument(refHandle, ref.content))
+      }
+    }
+
+    // Main doc edit LAST (refs exist in the same transaction)
     const mainHandle = createDocumentHandle({
       documentId: this.docId,
       documentType: this.documentType,
@@ -97,36 +112,21 @@ export class SanityBridge {
     })
     actions.push(editDocument(mainHandle, { set: patch }))
 
-    // Write main doc
-    applyDocumentActions(this.instance, { actions, ...(transactionId && { transactionId }) }).catch((err) => {
-      console.error(`[sanity-bridge] main doc write error for ${this.docId}:`, err)
-    })
-
-    // Write ref docs separately (edit if exists, create if new)
-    if (refDocs) {
-      for (const ref of refDocs) {
-        const editHandle = createDocumentHandle({
-          documentId: ref.docId,
-          documentType: ref.documentType,
-          ...this.resource,
-        })
-        applyDocumentActions(this.instance, {
-          actions: [editDocument(editHandle, { set: ref.content })],
-        }).catch(() => {
-          // Edit failed (doc doesn't exist yet) — create it
-          const createHandle = createDocumentTypeHandle({
-            documentId: ref.docId,
-            documentType: ref.documentType,
-            ...this.resource,
-          })
-          applyDocumentActions(this.instance, {
-            actions: [createDocument(createHandle, ref.content)],
-          }).catch((err2) => {
-            console.error(`[sanity-bridge] ref doc error for ${ref.docId}:`, err2)
-          })
-        })
-      }
-    }
+    applyDocumentActions(this.instance, {
+      actions,
+      ...(transactionId && { transactionId }),
+    }).then(
+      async (result) => {
+        console.log(`[bridge:${this.docId}] applied: txn=${result.transactionId} actions=${actions.length}`)
+        try {
+          await result.submitted()
+          console.log(`[bridge:${this.docId}] CONFIRMED`)
+        } catch (err: any) {
+          console.error(`[bridge:${this.docId}] REJECTED:`, err.message ?? err)
+        }
+      },
+      (err) => console.error(`[bridge:${this.docId}] FAILED:`, err.message ?? err),
+    )
   }
 
   dispose(): void {

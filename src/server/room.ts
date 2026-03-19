@@ -221,10 +221,8 @@ export class Room {
     // Skip our own write echoes — we know all our transaction IDs
     const rev = rawDoc._rev as string | undefined
     if (rev && doc.ownTxns.has(rev)) {
-      // Our own write — update refs but don't touch domain state
-      if (doc.mapping.resolveRefs) {
-        this.updateRefs(key, doc.mapping, rawDoc)
-      }
+      // Our own write — don't touch domain state, don't create ref subscriptions
+      // (ref bridges are created when the server confirms, via a later non-own echo)
       return
     }
 
