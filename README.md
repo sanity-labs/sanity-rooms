@@ -96,19 +96,78 @@ const manager = new RoomManager(instance, resource, {
   },
 })
 
-// 3. On client connection
+// 3. On client connection — create a transport pair and wire both sides
 const room = await manager.getOrCreate(roomId)
 await room.ready // waits for SDK to hydrate all docs + refs
-room.addClient(transport)
 ```
 
-### Client
+### Connecting clients to rooms
+
+The `Transport` interface is how clients and rooms communicate. Each connection needs a **pair** — a client-side transport and a server-side transport linked together. What links them is up to you: WebSocket, HTTP, or shared memory.
+
+#### Option A: WebSocket
+
+```typescript
+import type { ServerTransport } from 'sanity-rooms'
+
+// Server: on WS connection, wrap the socket in a ServerTransport
+wss.on('connection', (ws) => {
+  const transport: ServerTransport = {
+    clientId: crypto.randomUUID(),
+    send: (msg) => ws.send(JSON.stringify(msg)),
+    onMessage: (handler) => {
+      const fn = (data: any) => handler(JSON.parse(String(data)))
+      ws.on('message', fn)
+      return () => ws.off('message', fn)
+    },
+    onClose: (handler) => { ws.on('close', handler); return () => ws.off('close', handler) },
+    close: () => ws.close(),
+  }
+  room.addClient(transport)
+})
+
+// Client (browser): wrap the browser WebSocket
+const ws = new WebSocket('wss://...')
+const transport: Transport = {
+  send: (msg) => ws.send(JSON.stringify(msg)),
+  onMessage: (handler) => {
+    const fn = (e: MessageEvent) => handler(JSON.parse(e.data))
+    ws.addEventListener('message', fn)
+    return () => ws.removeEventListener('message', fn)
+  },
+  onClose: (handler) => { ws.addEventListener('close', handler); return () => ws.removeEventListener('close', handler) },
+  close: () => ws.close(),
+}
+const syncClient = new SyncClient({ transport, documents: { ... } })
+```
+
+#### Option B: In-process (no network)
+
+For testing, SSR, or same-process setups where client and server run in the same Node process:
+
+```typescript
+import { createMemoryTransportPair } from 'sanity-rooms/testing'
+
+// Creates a linked pair — send on one side, receive on the other
+const { client, server } = createMemoryTransportPair()
+
+// Server side
+room.addClient(server)
+
+// Client side — same process, no WebSocket
+const syncClient = new SyncClient({ transport: client, documents: { ... } })
+
+// They communicate via microtasks — no serialization, no network
+syncClient.mutate('config', { kind: 'replace', state: newConfig })
+```
+
+### Client API
 
 ```typescript
 import { SyncClient } from 'sanity-rooms/client'
 
-const client = new SyncClient({
-  transport,
+const syncClient = new SyncClient({
+  transport, // from either option above
   documents: {
     config: {
       initialState: config,
@@ -116,55 +175,24 @@ const client = new SyncClient({
         if (mutation.kind === 'replace') return mutation.state
         return null
       },
-      reconcile: immutableReconcile,
+      reconcile: immutableReconcile, // preserve referential identity
     },
   },
 })
 
-// Optimistic state
-client.subscribeDoc('config', () => {
-  setConfig(client.getDocState('config'))
+// Read state (optimistic — includes pending mutations)
+syncClient.subscribeDoc('config', () => {
+  const updated = syncClient.getDocState('config')
+  setConfig(updated) // React setState, Svelte store, etc.
 })
 
-// Mutate (optimistic + debounced send)
-client.mutate('config', { kind: 'replace', state: newConfig })
-
-// App channels
-client.sendApp('chat', { text: 'hello' })
-client.onApp('chat', (payload) => handleChat(payload))
-```
-
-## In-process transport (no network)
-
-The transport abstraction isn't just for WebSockets. The `./testing` export provides `createMemoryTransportPair()` — a linked client/server transport pair that communicates in-process via microtasks. No network, no serialization overhead.
-
-This is useful for:
-
-- **Testing** — run a Room + SyncClient in the same process, verify the full round-trip
-- **SSR / same-process servers** — if your server and client run in the same Node process (e.g. Vite SSR), skip WebSocket entirely
-- **Edge functions** — deploy a Room in a serverless function, connect clients via HTTP request/response pairs
-
-```typescript
-import { createMemoryTransportPair } from 'sanity-rooms/testing'
-
-// Create a linked pair — messages sent on one side arrive on the other
-const { client, server } = createMemoryTransportPair()
-
-// Server side: add to room
-room.addClient(server)
-
-// Client side: create SyncClient with the client transport
-const syncClient = new SyncClient({
-  transport: client,
-  documents: { ... },
-})
-
-// They communicate in-process — no WebSocket, no network
+// Mutate (applied optimistically, sent to server debounced)
 syncClient.mutate('config', { kind: 'replace', state: newConfig })
-// Room receives it, broadcasts to other clients, writes to Sanity
-```
 
-This is what makes sanity-rooms transport-agnostic — the Room and SyncClient don't know or care whether they're connected via WebSocket, HTTP, or shared memory. The protocol is the same.
+// App channels (chat, presence, whatever)
+syncClient.sendApp('chat', { text: 'hello' })
+syncClient.onApp('chat', (payload) => handleChat(payload))
+```
 
 ## Document references
 
