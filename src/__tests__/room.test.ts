@@ -23,13 +23,14 @@ const testMapping: DocumentMapping<{ value: number }> = {
   },
 }
 
-function makeRoom(initialValue = 0) {
+async function makeRoom(initialValue = 0) {
   const mock = createMockSanity({ 'doc-1': { value: initialValue } })
   const room = new Room(
-    { documents: { main: { docId: 'doc-1', mapping: testMapping, initialState: { value: initialValue } } }, gracePeriodMs: 100 },
+    { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
     mock.instance,
     mock.resource,
   )
+  await room.ready
   return { room, mock }
 }
 
@@ -43,7 +44,7 @@ function connectClient(room: Room) {
 
 describe('Room', () => {
   it('sends initial state on client join', async () => {
-    const { room } = makeRoom(42)
+    const { room } = await makeRoom(42)
     const { received } = connectClient(room)
     await flushMicrotasks()
     const stateMsg = received.find((m) => m.type === 'state')
@@ -53,7 +54,7 @@ describe('Room', () => {
   })
 
   it('client mutation → ack to sender, state to others', async () => {
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     const c1 = connectClient(room)
     const c2 = connectClient(room)
     await flushMicrotasks()
@@ -71,7 +72,7 @@ describe('Room', () => {
   })
 
   it('external edit broadcasts to all', async () => {
-    const { room, mock } = makeRoom(0)
+    const { room, mock } = await makeRoom(0)
     const c1 = connectClient(room)
     await flushMicrotasks()
     c1.received.length = 0
@@ -85,7 +86,7 @@ describe('Room', () => {
   })
 
   it('rejects invalid mutations', async () => {
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     const c1 = connectClient(room)
     await flushMicrotasks()
     c1.received.length = 0
@@ -99,7 +100,7 @@ describe('Room', () => {
   })
 
   it('app channel routes and broadcasts', async () => {
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     const handler = vi.fn()
     room.registerAppChannel('chat', {
       onMessage(clientId, payload, r) { handler(clientId, payload); r.broadcastApp('chat', { echo: payload }, clientId) },
@@ -122,7 +123,7 @@ describe('Room', () => {
 
   it('grace period disposes after timeout', async () => {
     vi.useFakeTimers()
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     const onEmpty = vi.fn()
     room.onEmpty = onEmpty
     const c1 = connectClient(room)
@@ -134,7 +135,7 @@ describe('Room', () => {
 
   it('grace period cancelled by reconnection', async () => {
     vi.useFakeTimers()
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     const onEmpty = vi.fn()
     room.onEmpty = onEmpty
     const c1 = connectClient(room)
@@ -149,7 +150,7 @@ describe('Room', () => {
   })
 
   it('getDocState and mutateDoc', async () => {
-    const { room } = makeRoom(10)
+    const { room } = await makeRoom(10)
     await flushMicrotasks()
     expect(room.getDocState('main')).toEqual({ value: 10 })
     room.mutateDoc('main', { kind: 'replace', state: { value: 50 } })
@@ -158,7 +159,7 @@ describe('Room', () => {
   })
 
   it('clientCount reflects connections', async () => {
-    const { room } = makeRoom(0)
+    const { room } = await makeRoom(0)
     expect(room.clientCount).toBe(0)
     const c1 = connectClient(room)
     expect(room.clientCount).toBe(1)

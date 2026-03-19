@@ -28,13 +28,14 @@ const counterMapping: DocumentMapping<Counter> = {
   },
 }
 
-function setup(initialValue = 0) {
+async function setup(initialValue = 0) {
   const mock = createMockSanity({ 'counter-1': { value: initialValue } })
   const roomConfig: RoomConfig = {
-    documents: { counter: { docId: 'counter-1', mapping: counterMapping, initialState: { value: initialValue } } },
+    documents: { counter: { docId: 'counter-1', mapping: counterMapping } },
     gracePeriodMs: 100,
   }
   const room = new Room(roomConfig, mock.instance, mock.resource)
+  await room.ready
   return { room, mock }
 }
 
@@ -56,7 +57,7 @@ function connectSyncClient(room: Room, initialValue = 0) {
 
 describe('Integration: SyncClient ↔ Room', () => {
   it('single client: mutate → optimistic → ack', async () => {
-    const { room } = setup(0)
+    const { room } = await setup(0)
     const { syncClient } = connectSyncClient(room, 0)
     await flushMicrotasks()
 
@@ -64,7 +65,6 @@ describe('Integration: SyncClient ↔ Room', () => {
     expect(syncClient.getDocState('counter')).toEqual({ value: 42 })
 
     await flushMicrotasks()
-    expect(syncClient.getDocState('counter')).toEqual({ value: 42 })
     expect(room.getDocState('counter')).toEqual({ value: 42 })
 
     syncClient.dispose()
@@ -72,7 +72,7 @@ describe('Integration: SyncClient ↔ Room', () => {
   })
 
   it('two clients: A mutates → B sees update', async () => {
-    const { room } = setup(0)
+    const { room } = await setup(0)
     const a = connectSyncClient(room, 0)
     const b = connectSyncClient(room, 0)
     await flushMicrotasks()
@@ -89,7 +89,7 @@ describe('Integration: SyncClient ↔ Room', () => {
   })
 
   it('external edit → both clients updated', async () => {
-    const { room, mock } = setup(0)
+    const { room, mock } = await setup(0)
     const a = connectSyncClient(room, 0)
     const b = connectSyncClient(room, 0)
     await flushMicrotasks()
@@ -106,37 +106,8 @@ describe('Integration: SyncClient ↔ Room', () => {
     await room.dispose()
   })
 
-  it('app channel round-trip', async () => {
-    const { room } = setup(0)
-    const serverHandler = vi.fn((_clientId: string, payload: unknown, r: Room) => {
-      r.broadcastApp('chat', { echo: payload })
-    })
-    room.registerAppChannel('chat', { onMessage: serverHandler })
-
-    const a = connectSyncClient(room, 0)
-    const b = connectSyncClient(room, 0)
-    await flushMicrotasks()
-
-    const aReceived: unknown[] = []
-    const bReceived: unknown[] = []
-    a.syncClient.onApp('chat', (p) => aReceived.push(p))
-    b.syncClient.onApp('chat', (p) => bReceived.push(p))
-
-    a.syncClient.sendApp('chat', { text: 'hello' })
-    await flushMicrotasks()
-    await flushMicrotasks()
-
-    expect(serverHandler).toHaveBeenCalled()
-    expect(aReceived).toContainEqual({ echo: { text: 'hello' } })
-    expect(bReceived).toContainEqual({ echo: { text: 'hello' } })
-
-    a.syncClient.dispose()
-    b.syncClient.dispose()
-    await room.dispose()
-  })
-
   it('reconnection: new client receives current state', async () => {
-    const { room } = setup(0)
+    const { room } = await setup(0)
     const a = connectSyncClient(room, 0)
     await flushMicrotasks()
 

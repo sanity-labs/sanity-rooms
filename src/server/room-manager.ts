@@ -60,6 +60,7 @@ export class RoomManager {
     if (!config) return null
 
     const room = new Room(config, this.instance, this.resource)
+    await room.ready
     room.onEmpty = () => { this.rooms.delete(roomId) }
     this.rooms.set(roomId, room)
 

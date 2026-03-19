@@ -24,7 +24,6 @@ import { SanityBridge, type SanityResource } from './sanity-bridge'
 export interface RoomDocConfig {
   docId: string
   mapping: DocumentMapping<unknown>
-  initialState: unknown
 }
 
 export interface RoomConfig {
@@ -51,6 +50,8 @@ interface DocEntry {
   state: unknown
   /** Transaction IDs of our own writes — skip echoes with matching _rev. */
   ownTxns: Set<string>
+  /** Called after state changes — resolves the ready promise when fully hydrated. */
+  onHydrated?: () => void
 }
 
 // ── Room ──────────────────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ export class Room {
   private refBridges = new Map<string, Map<string, SanityBridge>>()
   private updatingRefs = new Set<string>()
 
+  /** Resolves when all doc bridges have received their first state from the SDK. */
+  readonly ready: Promise<void[]>
+
   onEmpty: (() => void) | null = null
 
   constructor(config: RoomConfig, instance: SanityInstance, resource: SanityResource) {
@@ -76,9 +80,11 @@ export class Room {
     this.resource = resource
     this.gracePeriodMs = config.gracePeriodMs ?? 30_000
 
+    const readyPromises: Promise<void>[] = []
     for (const [key, docConfig] of Object.entries(config.documents)) {
-      this.createDoc(key, docConfig)
+      readyPromises.push(this.createDoc(key, docConfig))
     }
+    this.ready = Promise.all(readyPromises)
   }
 
   // ── Client management ─────────────────────────────────────────────────
@@ -193,20 +199,42 @@ export class Room {
 
   // ── Internal: doc setup ───────────────────────────────────────────────
 
-  private createDoc(key: string, docConfig: RoomDocConfig): void {
-    const bridge = new SanityBridge({
-      instance: this.instance,
-      resource: this.resource,
-      docId: docConfig.docId,
-      documentType: docConfig.mapping.documentType,
-      onChange: (rawDoc) => this.handleSanityChange(key, rawDoc),
-    })
+  private createDoc(key: string, docConfig: RoomDocConfig): Promise<void> {
+    return new Promise((resolve) => {
+      let resolved = false
+      const tryResolve = () => {
+        if (resolved) return
+        const doc = this.docs.get(key)
+        if (!doc || doc.state === null) return
+        // If this doc has refs, wait until ref bridges have emitted too
+        const refMap = this.refBridges.get(key)
+        if (docConfig.mapping.resolveRefs && refMap && refMap.size > 0) {
+          for (const refBridge of refMap.values()) {
+            if (Object.keys(refBridge.getRawDoc()).length === 0) return // ref not loaded yet
+          }
+        }
+        resolved = true
+        resolve()
+      }
 
-    this.docs.set(key, {
-      bridge,
-      mapping: docConfig.mapping,
-      state: docConfig.initialState,
-      ownTxns: new Set(),
+      const bridge = new SanityBridge({
+        instance: this.instance,
+        resource: this.resource,
+        docId: docConfig.docId,
+        documentType: docConfig.mapping.documentType,
+        onChange: (rawDoc) => {
+          this.handleSanityChange(key, rawDoc)
+          tryResolve()
+        },
+      })
+
+      this.docs.set(key, {
+        bridge,
+        onHydrated: tryResolve,
+        mapping: docConfig.mapping,
+        state: null,
+        ownTxns: new Set(),
+      })
     })
   }
 
@@ -243,6 +271,9 @@ export class Room {
     // External change — update state and broadcast
     doc.state = reconciled
     this.broadcastAll({ channel: docChannel(key), type: 'state', state: reconciled })
+
+    // Check if fully hydrated (for ready promise)
+    doc.onHydrated?.()
   }
 
   // ── Internal: ref following ───────────────────────────────────────────
