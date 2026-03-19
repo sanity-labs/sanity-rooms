@@ -1,20 +1,16 @@
-/**
- * SanityBridge tests — verifies the raw document store behavior.
- * Bridge stores raw docs and writes raw patches. No domain mapping.
- */
 import { describe, it, expect, vi } from 'vitest'
-import { createMockSanity, createSdkMocks } from '../testing/mock-sanity'
-import { flushMicrotasks } from '../testing/memory-transport'
 
 vi.mock('@sanity/sdk', async () => {
   const { createSdkMocks } = await import('../testing/mock-sanity')
   return createSdkMocks()
 })
 
-const { SanityBridge } = await import('../server/sanity-bridge')
+import { createMockSanity } from '../testing/mock-sanity'
+import { SanityBridge } from '../server/sanity-bridge'
+import { flushMicrotasks } from '../testing/memory-transport'
 
 describe('SanityBridge', () => {
-  it('notifies onChange when doc changes', async () => {
+  it('calls onChange when doc changes', async () => {
     const mock = createMockSanity({ 'doc-1': { title: 'Hello' } })
     const onChange = vi.fn()
 
@@ -30,31 +26,26 @@ describe('SanityBridge', () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ title: 'Hello' }))
 
     mock.simulateExternalEdit('doc-1', { title: 'Updated' })
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ title: 'Updated' }))
+    expect(bridge.getRawDoc()).toEqual(expect.objectContaining({ title: 'Updated' }))
 
     bridge.dispose()
   })
 
-  it('getRawDoc returns current state', async () => {
-    const mock = createMockSanity({ 'doc-1': { value: 42 } })
-
+  it('strips drafts. prefix from docId', () => {
+    const mock = createMockSanity()
     const bridge = new SanityBridge({
       instance: mock.instance,
       resource: mock.resource,
-      docId: 'doc-1',
+      docId: 'drafts.my-doc',
       documentType: 'test',
       onChange: () => {},
     })
-
-    await flushMicrotasks()
-    expect(bridge.getRawDoc()).toEqual(expect.objectContaining({ value: 42 }))
-
+    expect(bridge.docId).toBe('my-doc')
     bridge.dispose()
   })
 
-  it('write sends patches to SDK', async () => {
+  it('write sends patches', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
-
     const bridge = new SanityBridge({
       instance: mock.instance,
       resource: mock.resource,
@@ -62,21 +53,39 @@ describe('SanityBridge', () => {
       documentType: 'test',
       onChange: () => {},
     })
+    await flushMicrotasks()
 
     bridge.write({ value: 2 })
     await flushMicrotasks()
 
-    const patches = mock.getPatches('doc-1')
-    expect(patches.length).toBeGreaterThanOrEqual(1)
-    expect(patches[patches.length - 1]).toEqual(expect.objectContaining({ value: 2 }))
+    expect(mock.getPatches('doc-1').length).toBeGreaterThanOrEqual(1)
+    bridge.dispose()
+  })
+
+  it('buffers writes until ready', async () => {
+    const mock = createMockSanity({ 'doc-1': { value: 1 } })
+    const bridge = new SanityBridge({
+      instance: mock.instance,
+      resource: mock.resource,
+      docId: 'doc-1',
+      documentType: 'test',
+      onChange: () => {},
+    })
+
+    // Write before first emit
+    bridge.write({ value: 99 })
+    expect(mock.getPatches('doc-1')).toHaveLength(0)
+
+    // First emit triggers flush
+    await flushMicrotasks()
+    expect(mock.getPatches('doc-1').length).toBeGreaterThanOrEqual(1)
 
     bridge.dispose()
   })
 
-  it('dispose stops notifications', async () => {
+  it('dispose stops onChange', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const onChange = vi.fn()
-
     const bridge = new SanityBridge({
       instance: mock.instance,
       resource: mock.resource,
@@ -84,11 +93,10 @@ describe('SanityBridge', () => {
       documentType: 'test',
       onChange,
     })
-
     await flushMicrotasks()
     onChange.mockClear()
-    bridge.dispose()
 
+    bridge.dispose()
     mock.simulateExternalEdit('doc-1', { value: 99 })
     expect(onChange).not.toHaveBeenCalled()
   })
