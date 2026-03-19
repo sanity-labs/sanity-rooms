@@ -218,11 +218,10 @@ export class Room {
     const doc = this.docs.get(key)
     if (!doc) return
 
-    // Skip our own write echoes by transaction ID
+    // Skip our own write echoes — we know all our transaction IDs
     const rev = rawDoc._rev as string | undefined
     if (rev && doc.ownTxns.has(rev)) {
-      doc.ownTxns.delete(rev)
-      // Still update refs — new refs from our write need subscriptions
+      // Our own write — update refs but don't touch domain state
       if (doc.mapping.resolveRefs) {
         this.updateRefs(key, doc.mapping, rawDoc)
       }

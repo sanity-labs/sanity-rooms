@@ -38,11 +38,14 @@ export class SanityBridge {
   private readonly resource: SanityResource
   private readonly onChange: (doc: Record<string, unknown>) => void
   private unsubscribe: (() => void) | null = null
+  private ready = false
+  private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: Array<{ docId: string; documentType: string; content: Record<string, unknown> }>; transactionId?: string }> = []
 
   constructor(options: SanityBridgeOptions) {
     this.instance = options.instance
     this.resource = options.resource
-    this.docId = options.docId
+    // Strip drafts. prefix — the SDK manages draft lifecycle internally
+    this.docId = options.docId.replace(/^drafts\./, '')
     this.documentType = options.documentType
     this.onChange = options.onChange
 
@@ -55,6 +58,14 @@ export class SanityBridge {
     const sub = docState.observable.subscribe((doc) => {
       if (!doc) return
       this.rawDoc = doc as Record<string, unknown>
+      if (!this.ready) {
+        this.ready = true
+        // Flush any writes that arrived before the SDK was ready
+        for (const w of this.pendingWrites) {
+          this.write(w.patch, w.refDocs, w.transactionId)
+        }
+        this.pendingWrites = []
+      }
       this.onChange(this.rawDoc)
     })
     this.unsubscribe = () => sub.unsubscribe()
@@ -64,12 +75,18 @@ export class SanityBridge {
     return this.rawDoc
   }
 
-  /** Write raw patches to the main doc. Optionally batch ref doc writes. */
+  /** Write raw patches to the main doc. Optionally write ref docs separately. */
   write(
     patch: Record<string, unknown>,
     refDocs?: Array<{ docId: string; documentType: string; content: Record<string, unknown> }>,
     transactionId?: string,
   ): void {
+    // Buffer writes until SDK state is ready (grants loaded, doc fetched)
+    if (!this.ready) {
+      this.pendingWrites.push({ patch, refDocs, transactionId })
+      return
+    }
+
     const actions: any[] = []
 
     // Main doc edit
