@@ -3,124 +3,103 @@
 > **⚠️ Proof of Concept — Work in Progress**
 > This is an early-stage experiment, 100% vibecoded. APIs will change. Not production-ready.
 
-Transport-agnostic, optimistic document synchronization for Sanity. Provides multi-client rooms with real-time broadcast, a document mapping layer, and app-defined channels — on top of `@sanity/sdk`'s listener and conflict resolution infrastructure.
+Transport-agnostic, optimistic document synchronization for Sanity. Provides multi-client rooms with real-time broadcast, a document mapping layer, and app-defined channels — on top of `@sanity/sdk`'s document store and shared listener.
 
 ## What this is
 
 A coordination layer between `@sanity/sdk` (Sanity connection) and your app (multiple clients editing documents). It handles:
 
-- **Rooms** — server-side state hubs managing N clients × M documents
-- **Optimistic updates** — two levels: client→server (immediate UI), server→Sanity (via sdk)
-- **Document mapping** — your in-memory state shape ≠ Sanity doc shape? Provide `fromSanity`/`toSanityPatch` and the package handles the translation
+- **Rooms** — server-side state hubs managing N clients x M documents
+- **Two-layer architecture** — SDK layer (raw Sanity docs) + domain layer (your app's mapped state)
+- **Document mapping** — your in-memory state shape != Sanity doc shape? Provide `fromSanity`/`toSanityPatch` and the Room handles translation
+- **Ref following** — `resolveRefs` discovers referenced docs, Room auto-subscribes via SDK's shared listener (zero extra connections), `fromSanityWithRefs` assembles the full state
 - **Transport abstraction** — WebSocket, POST+SSE, long-polling, in-process. Implement 4 methods, done.
 - **App channels** — first-class named channels for concerns the package doesn't own (chat, presence, streaming)
+- **Own-write echo suppression** — tracks transaction IDs, skips SDK echoes from our own writes
 
 ## What this is NOT
 
 | Concern | sanity-rooms | Where it lives instead |
 |---------|------------|----------------------|
 | Sanity API client | No | `@sanity/client` |
-| Document listeners, conflict rebase, revision tracking | No (delegates) | `@sanity/sdk` via `SdkAdapter` |
 | React hooks | No | Your app (`useSyncExternalStore` wrapper is ~10 lines) |
 | Auth, permissions | No | Your app / transport layer |
 | GROQ queries | Not yet | Planned: local evaluation via `groq-js` with optimistic state |
 | AI chat, streaming | No | App channel (`room.registerAppChannel('chat', ...)`) |
 | WebSocket server | No | Your app provides a `Transport` adapter |
 
-## Comparison with @sanity/sdk
-
-| Feature | @sanity/sdk | sanity-rooms |
-|---------|------------|-------------|
-| **Single-client document state** | `getDocumentState()` → reactive `StateSource` | `SyncClient.getDocState()` + `subscribeDoc()` |
-| **Optimistic updates** | `editDocument()` with automatic rebase | Client-side `MutationQueue` with rebase on server state |
-| **Conflict resolution** | Automatic 3-way merge | Delegates to sdk on server side; client rebases pending mutations |
-| **Shared listener** | Single EventSource, multicasted | Delegates to sdk (via `SdkAdapter.subscribe`) |
-| **Multi-client broadcast** | ❌ Single consumer | ✅ Room broadcasts to N clients |
-| **Transport** | Hardcoded (Sanity API over HTTP/WS) | Pluggable (`Transport` interface) |
-| **Shape mapping** | ❌ Stored shape = in-memory shape | ✅ `DocumentMapping` with `fromSanity`/`toSanityPatch` |
-| **App-defined channels** | ❌ | ✅ Named channels with handlers |
-| **Room lifecycle** | ❌ | ✅ Grace period, dispose, `onEmpty` callback |
-| **Server-side usage** | Works but not optimized | Designed for it (Room runs on your server) |
-| **React dependency** | Optional (hooks in `@sanity/sdk-react`) | None |
-| **GROQ queries** | `getQueryState()` / `resolveQuery()` | Not yet (planned with local evaluation) |
-
-**In short:** `@sanity/sdk` manages one client's connection to Sanity. `sanity-rooms` manages N clients' connections to your server, which uses `@sanity/sdk` to talk to Sanity.
-
 ## Architecture
 
 ```
 Clients (browser)                         Your Server (Node)
-─────────────────                         ──────────────────
-SyncClient ←─┐                            Room
-  optimistic │                              ├─ SanityBridge per doc
-  state      │    ┌──────────────┐          │   ├─ SdkAdapter.subscribe()
-  per doc    ├────│  Transport   │──────────│   ├─ SdkAdapter.applyPatches()
-             │    │  (anything)  │          │   └─ DocumentMapping
-SyncClient ←─┘    └──────────────┘          ├─ client registry + broadcast
-                                            ├─ app channels (chat, etc.)
-                                            └─ grace period lifecycle
+-----------------                         ------------------
+SyncClient <--+                            Room
+  optimistic  |                              +-- SanityBridge per doc (raw doc store)
+  state       |    +----------------+        |     +-- getDocumentState() (SDK)
+  per doc     +----| Transport      |--------+     +-- editDocument() + applyDocumentActions()
+              |    | (pluggable)    |        |     +-- createDocument() for ref docs
+SyncClient <--+    +----------------+        +-- DocumentMapping (domain <-> raw)
+                                             +-- resolveRefs + fromSanityWithRefs (ref assembly)
+                                             +-- client registry + broadcast
+                                             +-- app channels (chat, etc.)
+                                             +-- Room.ready (waits for all bridges)
+                                             +-- grace period lifecycle
 ```
+
+**Two layers, clean separation:**
+- **SanityBridge** stores raw Sanity docs. Subscribes via SDK, writes via SDK. No domain knowledge.
+- **Room** owns all domain logic. Maps raw docs to app state, assembles refs, broadcasts to clients.
 
 ## Packages
 
 | Export | Import | Contains |
 |--------|--------|----------|
 | `.` | `import { ... } from 'sanity-rooms'` | Types, protocol, transport, mapping, channel helpers, debounce, reconcile |
-| `./server` | `import { Room, RoomManager } from 'sanity-rooms/server'` | Room, RoomManager, SanityBridge, SdkAdapter |
+| `./server` | `import { Room, RoomManager } from 'sanity-rooms/server'` | Room, RoomManager, SanityBridge, SanityResource |
 | `./client` | `import { SyncClient } from 'sanity-rooms/client'` | SyncClient, MutationQueue |
-| `./testing` | `import { createMemoryTransportPair, createMockSanity } from 'sanity-rooms/testing'` | In-process transport, mock Sanity adapter |
+| `./testing` | `import { createMemoryTransportPair, createMockSanity } from 'sanity-rooms/testing'` | In-process transport, mock SDK |
 
 ## Usage
 
 ### Server
 
 ```typescript
+import { createSanityInstance } from '@sanity/sdk'
 import { Room, RoomManager } from 'sanity-rooms/server'
 import type { DocumentMapping } from 'sanity-rooms'
 
-// 1. Define how your state maps to/from Sanity documents
+const instance = createSanityInstance({ projectId, dataset, auth: { token } })
+const resource = { projectId, dataset }
+
+// 1. Define your mapping
 const messageMapping: DocumentMapping<MessageConfig> = {
   documentType: 'message',
-  projection: '{ ..., customFonts[]-> }',
   fromSanity: (doc) => sanityToConfig(doc),
-  toSanityPatch: (state) => configToSanity(state),
+  toSanityPatch: (state) => {
+    const result = configToSanity(state)
+    return { patch: result.message, refPatches: buildRefPatches(result) }
+  },
   applyMutation: (state, mutation) => {
-    if (mutation.kind === 'replace') return mutation.state as MessageConfig
+    if (mutation.kind === 'replace') return mutation.state
     return null
   },
+  resolveRefs: (doc) => extractCustomResourceRefs(doc),
+  fromSanityWithRefs: (doc, refDocs) => assembleWithDereferencedRefs(doc, refDocs),
 }
 
-// 2. Create an SdkAdapter (bridges @sanity/sdk to sanity-rooms)
-const adapter: SdkAdapter = {
-  subscribe(docId, docType, callback) {
-    const state = getDocumentState(sanityInstance, { documentId: docId, documentType: docType })
-    const sub = state.observable.subscribe((doc) => callback(doc))
-    return () => sub.unsubscribe()
-  },
-  applyPatches(docId, docType, patches) {
-    editDocument({ documentId: docId, documentType: docType }, { set: patches })
-  },
-}
-
-// 3. Create rooms via a factory
-const manager = new RoomManager(adapter, {
-  async create(roomId, context) {
-    const doc = await fetchDoc(roomId)
+// 2. Create rooms via a factory
+const manager = new RoomManager(instance, resource, {
+  async create(roomId) {
+    const doc = await sanityClient.fetch(`*[_id == $id][0]{ _id }`, { id: roomId })
     if (!doc) return null
-    return {
-      documents: {
-        message: { docId: doc._id, mapping: messageMapping, initialState: sanityToConfig(doc) },
-      },
-    }
+    return { documents: { config: { docId: doc._id, mapping: messageMapping } } }
   },
 })
 
-// 4. On client connection (WebSocket example)
-wss.on('connection', async (ws) => {
-  const room = await manager.getOrCreate(roomId)
-  const transport = createWsTransport(ws)  // you write this adapter
-  room.addClient(transport)
-})
+// 3. On client connection
+const room = await manager.getOrCreate(roomId)
+await room.ready // waits for SDK to hydrate all docs + refs
+room.addClient(transport)
 ```
 
 ### Client
@@ -129,94 +108,47 @@ wss.on('connection', async (ws) => {
 import { SyncClient } from 'sanity-rooms/client'
 
 const client = new SyncClient({
-  transport: createWsTransport(ws),  // you write this adapter
+  transport,
   documents: {
-    message: {
+    config: {
       initialState: config,
       applyMutation: (state, mutation) => {
         if (mutation.kind === 'replace') return mutation.state
         return null
       },
-      reconcile: immutableReconcile,  // preserve referential identity
+      reconcile: immutableReconcile,
     },
   },
 })
 
-// Read state (optimistic — includes pending mutations)
-const config = client.getDocState<MessageConfig>('message')
-
-// Subscribe to changes
-client.subscribeDoc('message', () => {
-  const updated = client.getDocState<MessageConfig>('message')
-  setConfig(updated) // React setState, Svelte store, etc.
+// Optimistic state
+client.subscribeDoc('config', () => {
+  setConfig(client.getDocState('config'))
 })
 
-// Mutate (applied optimistically, sent to server debounced)
-client.mutate('message', { kind: 'replace', state: newConfig })
+// Mutate (optimistic + debounced send)
+client.mutate('config', { kind: 'replace', state: newConfig })
 
-// App channels (chat, presence, whatever)
+// App channels
 client.sendApp('chat', { text: 'hello' })
-client.onApp('chat', (payload) => handleChatMessage(payload))
+client.onApp('chat', (payload) => handleChat(payload))
 ```
 
-### Transport adapter (WebSocket example, ~20 lines)
+## Document references
 
-```typescript
-import type { Transport, ServerTransport } from 'sanity-rooms'
+Custom resources (fonts, palettes, backgrounds) are stored as separate Sanity documents with references from the main doc. The package handles this via:
 
-function createWsServerTransport(ws: WebSocket, clientId: string): ServerTransport {
-  return {
-    clientId,
-    send: (msg) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg)),
-    onMessage: (handler) => {
-      const listener = (data: any) => handler(JSON.parse(String(data)))
-      ws.on('message', listener)
-      return () => ws.off('message', listener)
-    },
-    onClose: (handler) => { ws.on('close', handler); return () => ws.off('close', handler) },
-    close: () => ws.close(),
-  }
-}
-```
-
-## Mutation kinds
-
-| Kind | Payload | Use case |
-|------|---------|----------|
-| `replace` | Full state object | Simplest — send entire state. Start here. |
-| `named` | `{ name, input }` | Intent-based (e.g. "addFrame at index 3"). Better conflict resolution. |
-| `patch` | Sanity-style patches | Raw field-level patches. Most granular. |
-
-All three flow through the same protocol. Your `DocumentMapping.applyMutation` decides how to handle each kind.
-
-## App channels
-
-The package routes `doc:*` channels internally. Everything else is an **app channel** — the package forwards messages without interpreting them.
-
-```typescript
-// Server: register a handler
-room.registerAppChannel('chat', {
-  onMessage(clientId, payload, room) {
-    // Process the message, then broadcast
-    room.broadcastApp('chat', { from: clientId, ...payload }, clientId)
-  },
-  onClientJoin(clientId, room) { /* send history, etc. */ },
-  onClientLeave(clientId, room) { /* cleanup */ },
-})
-
-// Server: send directly to one client
-room.sendApp(clientId, 'chat', { type: 'system', text: 'Welcome!' })
-
-// Client: send and receive
-client.sendApp('chat', { text: 'hello' })
-client.onApp('chat', (payload) => { /* handle */ })
-```
+1. **`resolveRefs(doc)`** — discovers ref IDs from the raw main doc
+2. **Ref bridges** — Room auto-subscribes to each ref doc via SDK's shared listener (one connection for all)
+3. **`fromSanityWithRefs(doc, refDocs)`** — assembles the complete domain state from main doc + ref docs
+4. **`toSanityPatch` returns `refPatches`** — ref doc content to write alongside the main doc
+5. **Atomic writes** — ref doc creates + main doc edit go in one `applyDocumentActions` batch
+6. **Weak references** — refs use `_weak: true` + `_strengthenOnPublish` so drafts can reference other drafts
 
 ## What's NOT here yet
 
-- **GROQ query subscriptions** — planned. Will use `groq-js` to evaluate queries locally against optimistic document state, so results update immediately (not after Sanity API round-trip).
-- **Reconnection** — `SyncClient` detects disconnect via `onClose` and exposes `status`. Reconnection logic (retry, backoff, re-auth) is your transport adapter's responsibility. On reconnect, the Room sends current state automatically.
-- **React bindings** — trivial to add in your app:
+- **GROQ query subscriptions** — planned with local evaluation via `groq-js`
+- **React bindings** — trivial:
   ```typescript
   function useDocState<T>(client: SyncClient, docId: string): T {
     return useSyncExternalStore(
