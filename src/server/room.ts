@@ -289,6 +289,7 @@ export class Room {
   // ── Internal: message handling ────────────────────────────────────────
 
   private handleClientMsg(clientId: string, msg: ClientMsg): void {
+    console.log(`[room] client ${clientId} msg:`, msg.type, msg.channel)
     const parsed = parseChannel(msg.channel)
 
     // App channel messages
@@ -314,6 +315,7 @@ export class Room {
         return
       }
 
+      console.log(`[room] applying mutation to ${parsed.id}:`, msg.mutation.kind)
       const result = bridge.applyMutation(msg.mutation)
       if (result === null) {
         this.sendTo(clientId, {

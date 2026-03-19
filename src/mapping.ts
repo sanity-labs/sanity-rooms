@@ -8,15 +8,15 @@
 
 import type { Mutation } from './mutation'
 
-export interface DocumentMapping<TState> {
+export interface DocumentMapping<TState, TSanityDoc = Record<string, unknown>, TSanityPatch = Record<string, unknown>> {
   /** Sanity document type (e.g. "message") */
   documentType: string
 
   /** Convert a Sanity document to the app's in-memory state */
-  fromSanity(doc: Record<string, unknown>): TState
+  fromSanity(doc: TSanityDoc): TState
 
   /** Convert app state to a Sanity patch object for writing */
-  toSanityPatch(state: TState): Record<string, unknown>
+  toSanityPatch(state: TState): TSanityPatch
 
   /** Apply a mutation to app state. Returns new state, or null if invalid. */
   applyMutation(state: TState, mutation: Mutation): TState | null
@@ -27,7 +27,7 @@ export interface DocumentMapping<TState> {
    * subscriptions and adds/removes bridges as needed. All refs share the
    * same SDK shared listener — zero extra connections.
    */
-  resolveRefs?(doc: Record<string, unknown>): RefDescriptor[]
+  resolveRefs?(doc: TSanityDoc): RefDescriptor[]
 }
 
 /** Describes a referenced document to auto-follow. */
