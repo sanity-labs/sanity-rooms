@@ -134,6 +134,38 @@ client.sendApp('chat', { text: 'hello' })
 client.onApp('chat', (payload) => handleChat(payload))
 ```
 
+## In-process transport (no network)
+
+The transport abstraction isn't just for WebSockets. The `./testing` export provides `createMemoryTransportPair()` — a linked client/server transport pair that communicates in-process via microtasks. No network, no serialization overhead.
+
+This is useful for:
+
+- **Testing** — run a Room + SyncClient in the same process, verify the full round-trip
+- **SSR / same-process servers** — if your server and client run in the same Node process (e.g. Vite SSR), skip WebSocket entirely
+- **Edge functions** — deploy a Room in a serverless function, connect clients via HTTP request/response pairs
+
+```typescript
+import { createMemoryTransportPair } from 'sanity-rooms/testing'
+
+// Create a linked pair — messages sent on one side arrive on the other
+const { client, server } = createMemoryTransportPair()
+
+// Server side: add to room
+room.addClient(server)
+
+// Client side: create SyncClient with the client transport
+const syncClient = new SyncClient({
+  transport: client,
+  documents: { ... },
+})
+
+// They communicate in-process — no WebSocket, no network
+syncClient.mutate('config', { kind: 'replace', state: newConfig })
+// Room receives it, broadcasts to other clients, writes to Sanity
+```
+
+This is what makes sanity-rooms transport-agnostic — the Room and SyncClient don't know or care whether they're connected via WebSocket, HTTP, or shared memory. The protocol is the same.
+
 ## Document references
 
 Custom resources (fonts, palettes, backgrounds) are stored as separate Sanity documents with references from the main doc. The package handles this via:
