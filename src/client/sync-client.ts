@@ -111,6 +111,14 @@ export class SyncClient {
       mutationId,
       mutation,
     }
+    // For replace mutations, drop previous pending replaces for the same doc
+    // (only the latest full state matters)
+    if (mutation.kind === 'replace') {
+      const channel = docChannel(docId)
+      this.pendingSends = this.pendingSends.filter(
+        (m) => !(m.type === 'mutate' && m.channel === channel && m.mutation.kind === 'replace'),
+      )
+    }
     this.pendingSends.push(msg)
     scheduleFlusher(this.flusher, () => this.flush(), this.debounceMs, this.maxWaitMs)
   }

@@ -7,6 +7,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { Room, type RoomConfig } from '../server/room'
 import { SyncClient } from '../client/sync-client'
 import { createMockSanity } from '../testing/mock-sanity'
+
 import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { DocumentMapping } from '../mapping'
 
@@ -17,7 +18,7 @@ interface Counter { value: number }
 const counterMapping: DocumentMapping<Counter> = {
   documentType: 'counter',
   fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { value: state.value } },
+  toSanityPatch(state) { return { patch: { value: state.value } } },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as Counter
     return null
@@ -36,7 +37,7 @@ function setup(initialValue = 0) {
     },
     gracePeriodMs: 100,
   }
-  const room = new Room(roomConfig, mock.adapter)
+  const room = new Room(roomConfig, mock.instance, mock.resource)
   return { room, mock }
 }
 

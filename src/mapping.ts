@@ -15,8 +15,11 @@ export interface DocumentMapping<TState, TSanityDoc = Record<string, unknown>, T
   /** Convert a Sanity document to the app's in-memory state */
   fromSanity(doc: TSanityDoc): TState
 
-  /** Convert app state to a Sanity patch object for writing */
-  toSanityPatch(state: TState): TSanityPatch
+  /**
+   * Convert app state to Sanity patches for the main document,
+   * plus optional patches for referenced documents.
+   */
+  toSanityPatch(state: TState): SanityPatchResult<TSanityPatch>
 
   /** Apply a mutation to app state. Returns new state, or null if invalid. */
   applyMutation(state: TState, mutation: Mutation): TState | null
@@ -28,6 +31,22 @@ export interface DocumentMapping<TState, TSanityDoc = Record<string, unknown>, T
    * same SDK shared listener — zero extra connections.
    */
   resolveRefs?(doc: TSanityDoc): RefDescriptor[]
+
+  /**
+   * Assemble the full state from the main doc + referenced docs.
+   * Called by the Room when assembling composite state from the main doc
+   * and its locally-held ref doc states. If not provided, fromSanity is
+   * used on the main doc alone (no ref assembly).
+   */
+  fromSanityWithRefs?(doc: TSanityDoc, refDocs: Map<string, Record<string, unknown>>): TState
+}
+
+/** Result of toSanityPatch — main doc patches + patches for referenced docs. */
+export interface SanityPatchResult<TSanityPatch = Record<string, unknown>> {
+  /** Patches for the main document */
+  patch: TSanityPatch
+  /** Patches for referenced documents, keyed by the same ref key used in resolveRefs */
+  refPatches?: Record<string, Record<string, unknown>>
 }
 
 /** Describes a referenced document to auto-follow. */

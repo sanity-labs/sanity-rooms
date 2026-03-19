@@ -16,7 +16,7 @@ export type {
   ServerErrorMsg,
 } from './protocol'
 export { isClientMsg, isServerMsg } from './protocol'
-export type { DocumentMapping, RefDescriptor } from './mapping'
+export type { DocumentMapping, RefDescriptor, SanityPatchResult } from './mapping'
 export type { ParsedChannel } from './channel'
 export { docChannel, queryChannel, parseChannel } from './channel'
 export type { DebouncedFlusher } from './debounce'

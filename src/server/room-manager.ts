@@ -5,7 +5,8 @@
  * Rooms auto-remove themselves from the manager when they empty + grace period expires.
  */
 
-import type { SdkAdapter } from './sanity-bridge'
+import type { SanityInstance } from '@sanity/sdk'
+import type { SanityResource } from './sanity-bridge'
 import { Room, type RoomConfig } from './room'
 
 export interface RoomFactory {
@@ -16,20 +17,20 @@ export interface RoomFactory {
 export class RoomManager {
   private rooms = new Map<string, Room>()
   private pending = new Map<string, Promise<Room | null>>()
-  private adapter: SdkAdapter
+  private instance: SanityInstance
+  private resource: SanityResource
   private factory: RoomFactory
 
-  constructor(adapter: SdkAdapter, factory: RoomFactory) {
-    this.adapter = adapter
+  constructor(instance: SanityInstance, resource: SanityResource, factory: RoomFactory) {
+    this.instance = instance
+    this.resource = resource
     this.factory = factory
   }
 
   async getOrCreate(roomId: string, context?: unknown): Promise<Room | null> {
-    // Return existing room
     const existing = this.rooms.get(roomId)
     if (existing) return existing
 
-    // Deduplicate concurrent creation
     const pendingPromise = this.pending.get(roomId)
     if (pendingPromise) return pendingPromise
 
@@ -58,7 +59,7 @@ export class RoomManager {
     const config = await this.factory.create(roomId, context)
     if (!config) return null
 
-    const room = new Room(config, this.adapter)
+    const room = new Room(config, this.instance, this.resource)
     room.onEmpty = () => { this.rooms.delete(roomId) }
     this.rooms.set(roomId, room)
 

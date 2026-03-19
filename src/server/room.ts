@@ -1,13 +1,12 @@
 /**
  * Room — server-side state hub for one logical resource.
  *
- * Manages N documents (each with a SanityBridge + mapping layer),
- * N connected clients (each with a ServerTransport), and app-defined
- * channels for concerns like chat or presence.
+ * Two layers:
+ * - SDK layer (SanityBridge): raw Sanity docs. Subscribe, store, write.
+ * - Domain layer (Room): mapped app state. Owns all mapping, ref assembly, broadcast.
  *
- * Supports dynamic ref-following: when a document's mapping has `resolveRefs`,
- * the Room auto-subscribes to referenced docs and broadcasts their state.
- * All refs share the SDK's single shared listener — zero extra connections.
+ * The bridge never sees domain state. The Room never sees raw Sanity docs
+ * except through the mapping functions.
  */
 
 import type { ServerTransport } from '../transport'
@@ -16,7 +15,9 @@ import type { ClientMsg, ServerMsg } from '../protocol'
 import { isClientMsg } from '../protocol'
 import { docChannel, parseChannel } from '../channel'
 import type { DocumentMapping } from '../mapping'
-import { SanityBridge, type SdkAdapter } from './sanity-bridge'
+import { immutableReconcile } from '../reconcile'
+import type { SanityInstance } from '@sanity/sdk'
+import { SanityBridge, type SanityResource } from './sanity-bridge'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -43,28 +44,40 @@ interface ClientInfo {
   unsubClose: () => void
 }
 
+interface DocEntry {
+  bridge: SanityBridge
+  mapping: DocumentMapping<unknown>
+  /** Domain state — the Room's authoritative app-level state. */
+  state: unknown
+  /** Transaction IDs of our own writes — skip echoes with matching _rev. */
+  ownTxns: Set<string>
+}
+
 // ── Room ──────────────────────────────────────────────────────────────────
 
 export class Room {
   private clients = new Map<string, ClientInfo>()
-  private bridges = new Map<string, SanityBridge<unknown>>()
+  private docs = new Map<string, DocEntry>()
   private appChannels = new Map<string, AppChannelHandler>()
   private graceTimer: ReturnType<typeof setTimeout> | null = null
   private gracePeriodMs: number
   private disposed = false
-  private adapter: SdkAdapter
+  private instance: SanityInstance
+  private resource: SanityResource
 
-  // Ref-following: tracks which ref bridges belong to which parent doc
-  private refBridges = new Map<string, Map<string, SanityBridge<unknown>>>() // parentKey → (refKey → bridge)
+  // Ref-following: ref bridges per parent doc key
+  private refBridges = new Map<string, Map<string, SanityBridge>>()
+  private updatingRefs = new Set<string>()
 
   onEmpty: (() => void) | null = null
 
-  constructor(config: RoomConfig, adapter: SdkAdapter) {
-    this.adapter = adapter
+  constructor(config: RoomConfig, instance: SanityInstance, resource: SanityResource) {
+    this.instance = instance
+    this.resource = resource
     this.gracePeriodMs = config.gracePeriodMs ?? 30_000
 
     for (const [key, docConfig] of Object.entries(config.documents)) {
-      this.createDocBridge(key, docConfig)
+      this.createDoc(key, docConfig)
     }
   }
 
@@ -77,93 +90,69 @@ export class Room {
     }
 
     const clientId = transport.clientId
-
     const unsubMessage = transport.onMessage((raw) => {
       if (isClientMsg(raw)) this.handleClientMsg(clientId, raw)
     })
     const unsubClose = transport.onClose(() => {
       this.removeClient(clientId)
     })
-
     this.clients.set(clientId, { transport, unsubMessage, unsubClose })
 
-    // Send current state for all documents (primary + refs)
-    for (const [key, bridge] of this.bridges) {
-      this.sendTo(clientId, {
-        channel: docChannel(key),
-        type: 'state',
-        state: bridge.getState(),
-      })
-    }
-    for (const [, refMap] of this.refBridges) {
-      for (const [refKey, bridge] of refMap) {
-        this.sendTo(clientId, {
-          channel: docChannel(refKey),
-          type: 'state',
-          state: bridge.getState(),
-        })
-      }
+    // Send current domain state for all docs
+    for (const [key, doc] of this.docs) {
+      this.sendTo(clientId, { channel: docChannel(key), type: 'state', state: doc.state })
     }
 
-    // Notify app channels
     for (const handler of this.appChannels.values()) {
       handler.onClientJoin?.(clientId, this)
     }
-
     return clientId
   }
 
   removeClient(clientId: string): void {
     const client = this.clients.get(clientId)
     if (!client) return
-
     client.unsubMessage()
     client.unsubClose()
     this.clients.delete(clientId)
-
-    // Notify app channels
     for (const handler of this.appChannels.values()) {
       handler.onClientLeave?.(clientId, this)
     }
-
     if (this.clients.size === 0) {
       this.graceTimer = setTimeout(() => {
-        if (this.clients.size === 0) {
-          this.dispose()
-        }
+        if (this.clients.size === 0) this.dispose()
       }, this.gracePeriodMs)
     }
   }
 
-  get clientCount(): number {
-    return this.clients.size
-  }
+  get clientCount(): number { return this.clients.size }
 
-  // ── State access (for app code, e.g. AI tools) ────────────────────────
+  // ── Domain state access ───────────────────────────────────────────────
 
   getDocState<T = unknown>(docKey: string): T {
-    const bridge = this.bridges.get(docKey)
-    if (bridge) return bridge.getState() as T
-    // Check ref bridges
-    for (const [, refMap] of this.refBridges) {
-      const refBridge = refMap.get(docKey)
-      if (refBridge) return refBridge.getState() as T
-    }
+    const doc = this.docs.get(docKey)
+    if (doc) return doc.state as T
     throw new Error(`Unknown document key: ${docKey}`)
   }
 
   mutateDoc(docKey: string, mutation: Mutation): void {
-    const bridge = this.bridges.get(docKey)
-    if (!bridge) throw new Error(`Unknown document key: ${docKey}`)
+    const doc = this.docs.get(docKey)
+    if (!doc) throw new Error(`Unknown document key: ${docKey}`)
 
-    const result = bridge.applyMutation(mutation)
-    if (result !== null) {
-      this.broadcastAll({
-        channel: docChannel(docKey),
-        type: 'state',
-        state: result,
-      })
-    }
+    const result = doc.mapping.applyMutation(doc.state, mutation)
+    if (result === null) return
+
+    doc.state = result
+
+    // Write to Sanity — generate txnId BEFORE write so echo suppression works
+    const { patch, refPatches } = doc.mapping.toSanityPatch(result)
+    const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
+    const txnId = crypto.randomUUID()
+    doc.ownTxns.add(txnId)
+    doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
+
+    // Broadcast domain state to all clients
+    this.broadcastAll({ channel: docChannel(docKey), type: 'state', state: result })
   }
 
   // ── App channels ──────────────────────────────────────────────────────
@@ -174,11 +163,8 @@ export class Room {
 
   broadcastApp(channel: string, payload: unknown, exclude?: string): void {
     const msg: ServerMsg = { channel, type: 'app', payload }
-    if (exclude) {
-      this.broadcastExcept(exclude, msg)
-    } else {
-      this.broadcastAll(msg)
-    }
+    if (exclude) this.broadcastExcept(exclude, msg)
+    else this.broadcastAll(msg)
   }
 
   sendApp(clientId: string, channel: string, payload: unknown): void {
@@ -190,53 +176,76 @@ export class Room {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-
-    if (this.graceTimer) {
-      clearTimeout(this.graceTimer)
-      this.graceTimer = null
-    }
-
-    for (const bridge of this.bridges.values()) {
-      bridge.dispose()
-    }
-    this.bridges.clear()
-
+    if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null }
+    for (const doc of this.docs.values()) doc.bridge.dispose()
+    this.docs.clear()
     for (const [, refMap] of this.refBridges) {
       for (const bridge of refMap.values()) bridge.dispose()
     }
     this.refBridges.clear()
-
     for (const client of this.clients.values()) {
-      client.unsubMessage()
-      client.unsubClose()
-      client.transport.close()
+      client.unsubMessage(); client.unsubClose(); client.transport.close()
     }
     this.clients.clear()
-
     this.appChannels.clear()
     this.onEmpty?.()
   }
 
-  // ── Internal: bridge creation ─────────────────────────────────────────
+  // ── Internal: doc setup ───────────────────────────────────────────────
 
-  private createDocBridge(key: string, docConfig: RoomDocConfig): void {
+  private createDoc(key: string, docConfig: RoomDocConfig): void {
     const bridge = new SanityBridge({
-      adapter: this.adapter,
+      instance: this.instance,
+      resource: this.resource,
       docId: docConfig.docId,
-      mapping: docConfig.mapping,
-      initialState: docConfig.initialState,
-      onStateChange: (state) => {
-        this.broadcastAll({
-          channel: docChannel(key),
-          type: 'state',
-          state,
-        })
-      },
-      onRawDoc: docConfig.mapping.resolveRefs
-        ? (doc) => this.updateRefs(key, docConfig.mapping, doc)
-        : undefined,
+      documentType: docConfig.mapping.documentType,
+      onChange: (rawDoc) => this.handleSanityChange(key, rawDoc),
     })
-    this.bridges.set(key, bridge)
+
+    this.docs.set(key, {
+      bridge,
+      mapping: docConfig.mapping,
+      state: docConfig.initialState,
+      ownTxns: new Set(),
+    })
+  }
+
+  /**
+   * Called when the SDK emits a raw doc change (our own write echo OR external edit).
+   * Maps the raw doc to domain state, compares with current state, broadcasts if different.
+   */
+  private handleSanityChange(key: string, rawDoc: Record<string, unknown>): void {
+    const doc = this.docs.get(key)
+    if (!doc) return
+
+    // Skip our own write echoes by transaction ID
+    const rev = rawDoc._rev as string | undefined
+    if (rev && doc.ownTxns.has(rev)) {
+      doc.ownTxns.delete(rev)
+      // Still update refs — new refs from our write need subscriptions
+      if (doc.mapping.resolveRefs) {
+        this.updateRefs(key, doc.mapping, rawDoc)
+      }
+      return
+    }
+
+    // Update ref subscriptions
+    if (doc.mapping.resolveRefs) {
+      this.updateRefs(key, doc.mapping, rawDoc)
+    }
+
+    // Map to domain state (with refs if available)
+    const mapped = doc.mapping.fromSanityWithRefs
+      ? doc.mapping.fromSanityWithRefs(rawDoc, this.getRefDocStates(key))
+      : doc.mapping.fromSanity(rawDoc)
+
+    // Compare with current state — skip if unchanged
+    const reconciled = immutableReconcile(doc.state, mapped)
+    if (reconciled === doc.state) return
+
+    // External change — update state and broadcast
+    doc.state = reconciled
+    this.broadcastAll({ channel: docChannel(key), type: 'state', state: reconciled })
   }
 
   // ── Internal: ref following ───────────────────────────────────────────
@@ -247,7 +256,8 @@ export class Room {
     rawDoc: Record<string, unknown>,
   ): void {
     if (!mapping.resolveRefs) return
-
+    if (this.updatingRefs.has(parentKey)) return
+    this.updatingRefs.add(parentKey)
     const desired = mapping.resolveRefs(rawDoc)
     const desiredKeys = new Map(desired.map((r) => [r.key, r]))
 
@@ -257,101 +267,107 @@ export class Room {
       this.refBridges.set(parentKey, current)
     }
 
-    // Remove stale refs
     for (const [refKey, bridge] of current) {
-      if (!desiredKeys.has(refKey)) {
-        bridge.dispose()
-        current.delete(refKey)
-      }
+      if (!desiredKeys.has(refKey)) { bridge.dispose(); current.delete(refKey) }
     }
 
-    // Add new refs
     for (const [refKey, desc] of desiredKeys) {
       if (!current.has(refKey)) {
         const refBridge = new SanityBridge({
-          adapter: this.adapter,
+          instance: this.instance,
+          resource: this.resource,
           docId: desc.docId,
-          mapping: desc.mapping,
-          initialState: {},
-          onStateChange: (state) => {
-            this.broadcastAll({
-              channel: docChannel(refKey),
-              type: 'state',
-              state,
-            })
+          documentType: desc.mapping.documentType,
+          onChange: (_refDoc) => {
+            // Ref doc changed — re-assemble parent state
+            this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {})
           },
         })
         current.set(refKey, refBridge)
       }
     }
+    this.updatingRefs.delete(parentKey)
   }
 
-  // ── Internal: message handling ────────────────────────────────────────
+  private getRefDocStates(parentKey: string): Map<string, Record<string, unknown>> {
+    const result = new Map<string, Record<string, unknown>>()
+    const refMap = this.refBridges.get(parentKey)
+    if (refMap) {
+      for (const [refKey, bridge] of refMap) {
+        const raw = bridge.getRawDoc()
+        if (raw && Object.keys(raw).length > 0) result.set(refKey, raw)
+      }
+    }
+    return result
+  }
+
+  /** Build ref doc write descriptors from toSanityPatch output. */
+  private buildRefDocWrites(
+    patch: Record<string, unknown>,
+    mapping: DocumentMapping<unknown>,
+    refPatches?: Record<string, Record<string, unknown>>,
+  ): Array<{ docId: string; documentType: string; content: Record<string, unknown> }> | undefined {
+    if (!refPatches || !mapping.resolveRefs) return undefined
+    const refs = mapping.resolveRefs(patch)
+    const refMap = new Map(refs.map(r => [r.key, r]))
+    const writes: Array<{ docId: string; documentType: string; content: Record<string, unknown> }> = []
+    for (const [refKey, content] of Object.entries(refPatches)) {
+      const desc = refMap.get(refKey)
+      if (desc) {
+        writes.push({ docId: desc.docId, documentType: desc.mapping.documentType, content })
+      }
+    }
+    return writes.length > 0 ? writes : undefined
+  }
+
+  // ── Internal: client messages ─────────────────────────────────────────
 
   private handleClientMsg(clientId: string, msg: ClientMsg): void {
-    console.log(`[room] client ${clientId} msg:`, msg.type, msg.channel)
     const parsed = parseChannel(msg.channel)
 
-    // App channel messages
     if (parsed.type === 'app' || msg.type === 'app') {
       const channelName = parsed.type === 'app' ? parsed.id : msg.channel
       const handler = this.appChannels.get(channelName)
-      if (handler && msg.type === 'app') {
-        handler.onMessage(clientId, msg.payload, this)
-      }
+      if (handler && msg.type === 'app') handler.onMessage(clientId, msg.payload, this)
       return
     }
 
-    // Document mutations
     if (parsed.type === 'doc' && msg.type === 'mutate') {
-      const bridge = this.bridges.get(parsed.id)
-      if (!bridge) {
-        this.sendTo(clientId, {
-          channel: msg.channel,
-          type: 'reject',
-          mutationId: msg.mutationId,
-          reason: `Unknown document: ${parsed.id}`,
-        })
+      const doc = this.docs.get(parsed.id)
+      if (!doc) {
+        this.sendTo(clientId, { channel: msg.channel, type: 'reject', mutationId: msg.mutationId, reason: `Unknown document: ${parsed.id}` })
         return
       }
 
-      console.log(`[room] applying mutation to ${parsed.id}:`, msg.mutation.kind)
-      const result = bridge.applyMutation(msg.mutation)
+      const result = doc.mapping.applyMutation(doc.state, msg.mutation)
       if (result === null) {
-        this.sendTo(clientId, {
-          channel: msg.channel,
-          type: 'reject',
-          mutationId: msg.mutationId,
-          reason: 'Mutation returned null (invalid)',
-        })
+        this.sendTo(clientId, { channel: msg.channel, type: 'reject', mutationId: msg.mutationId, reason: 'Mutation returned null' })
         return
       }
 
-      // Broadcast updated state to ALL clients
-      this.broadcastAll({
-        channel: msg.channel,
-        type: 'state',
-        state: result,
-      })
+      doc.state = result
 
-      // Ack to sender
-      this.sendTo(clientId, {
-        channel: msg.channel,
-        type: 'ack',
-        mutationId: msg.mutationId,
-      })
+      // Write to Sanity — generate txnId BEFORE write so echo suppression works
+      const { patch, refPatches } = doc.mapping.toSanityPatch(result)
+      const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
+      const txnId = crypto.randomUUID()
+      doc.ownTxns.add(txnId)
+      doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
+
+      // Broadcast to OTHER clients, ack to sender
+      this.broadcastExcept(clientId, { channel: msg.channel, type: 'state', state: result })
+      this.sendTo(clientId, { channel: msg.channel, type: 'ack', mutationId: msg.mutationId })
     }
   }
 
+  // ── Internal: transport ───────────────────────────────────────────────
+
   private sendTo(clientId: string, msg: ServerMsg): void {
-    const client = this.clients.get(clientId)
-    if (client) client.transport.send(msg)
+    this.clients.get(clientId)?.transport.send(msg)
   }
 
   private broadcastAll(msg: ServerMsg): void {
-    for (const client of this.clients.values()) {
-      client.transport.send(msg)
-    }
+    for (const client of this.clients.values()) client.transport.send(msg)
   }
 
   private broadcastExcept(excludeClientId: string, msg: ServerMsg): void {

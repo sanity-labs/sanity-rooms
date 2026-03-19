@@ -1,90 +1,115 @@
 /**
- * SanityBridge — wraps @sanity/sdk to manage one document with a mapping layer.
+ * SanityBridge — raw document store backed by @sanity/sdk.
  *
- * Subscribes to document state via sdk's getDocumentState(), maps between
- * Sanity doc shape and app state shape via DocumentMapping, and applies
- * mutations through editDocument(). sdk handles listener dedup, own-write
- * filtering, conflict rebasing, and revision tracking automatically.
+ * Subscribes to a document's state, stores the raw Sanity doc, and writes
+ * raw patches via editDocument + applyDocumentActions. Does NO domain mapping —
+ * that's the Room's job.
  */
 
-import type { Mutation } from '../mutation'
-import type { DocumentMapping } from '../mapping'
+import {
+  getDocumentState,
+  editDocument,
+  createDocument,
+  applyDocumentActions,
+  createDocumentHandle,
+  createDocumentTypeHandle,
+  type SanityInstance,
+} from '@sanity/sdk'
 
-/**
- * Narrow interface for the @sanity/sdk functions we use.
- * Makes the bridge testable without importing the full SDK.
- */
-export interface SdkAdapter {
-  /** Subscribe to a document's state. Returns unsubscribe function. */
-  subscribe(
-    docId: string,
-    documentType: string,
-    callback: (doc: Record<string, unknown> | null) => void,
-  ): () => void
-
-  /** Apply patches to a document via editDocument. */
-  applyPatches(
-    docId: string,
-    documentType: string,
-    patches: Record<string, unknown>,
-  ): void
+export interface SanityResource {
+  projectId: string
+  dataset: string
 }
 
-export interface SanityBridgeOptions<TState> {
-  adapter: SdkAdapter
+export interface SanityBridgeOptions {
+  instance: SanityInstance
+  resource: SanityResource
   docId: string
-  mapping: DocumentMapping<TState>
-  initialState: TState
-  onStateChange: (state: TState) => void
-  /** Called with the raw Sanity doc on every change (for resolveRefs). */
-  onRawDoc?: (doc: Record<string, unknown>) => void
+  documentType: string
+  /** Called whenever the raw Sanity doc changes. */
+  onChange: (doc: Record<string, unknown>) => void
 }
 
-export class SanityBridge<TState> {
-  private state: TState
-  private readonly mapping: DocumentMapping<TState>
-  private readonly adapter: SdkAdapter
-  private readonly docId: string
-  private readonly onStateChange: (state: TState) => void
-  private readonly onRawDoc?: (doc: Record<string, unknown>) => void
+export class SanityBridge {
+  readonly docId: string
+  readonly documentType: string
+  private rawDoc: Record<string, unknown> = {}
+  private readonly instance: SanityInstance
+  private readonly resource: SanityResource
+  private readonly onChange: (doc: Record<string, unknown>) => void
   private unsubscribe: (() => void) | null = null
 
-  constructor(options: SanityBridgeOptions<TState>) {
-    this.adapter = options.adapter
+  constructor(options: SanityBridgeOptions) {
+    this.instance = options.instance
+    this.resource = options.resource
     this.docId = options.docId
-    this.mapping = options.mapping
-    this.state = options.initialState
-    this.onStateChange = options.onStateChange
-    this.onRawDoc = options.onRawDoc
+    this.documentType = options.documentType
+    this.onChange = options.onChange
 
-    this.unsubscribe = this.adapter.subscribe(
-      this.docId,
-      this.mapping.documentType,
-      (doc) => {
-        if (!doc) return
-        const mapped = this.mapping.fromSanity(doc)
-        this.state = mapped
-        this.onStateChange(mapped)
-        this.onRawDoc?.(doc)
-      },
-    )
+    const handle = createDocumentHandle({
+      documentId: this.docId,
+      documentType: this.documentType,
+      ...this.resource,
+    })
+    const docState = getDocumentState(this.instance, handle)
+    const sub = docState.observable.subscribe((doc) => {
+      if (!doc) return
+      this.rawDoc = doc as Record<string, unknown>
+      this.onChange(this.rawDoc)
+    })
+    this.unsubscribe = () => sub.unsubscribe()
   }
 
-  getState(): TState {
-    return this.state
+  getRawDoc(): Record<string, unknown> {
+    return this.rawDoc
   }
 
-  applyMutation(mutation: Mutation): TState | null {
-    const result = this.mapping.applyMutation(this.state, mutation)
-    if (result === null) return null
+  /** Write raw patches to the main doc. Optionally batch ref doc writes. */
+  write(
+    patch: Record<string, unknown>,
+    refDocs?: Array<{ docId: string; documentType: string; content: Record<string, unknown> }>,
+    transactionId?: string,
+  ): void {
+    const actions: any[] = []
 
-    this.state = result
+    // Main doc edit
+    const mainHandle = createDocumentHandle({
+      documentId: this.docId,
+      documentType: this.documentType,
+      ...this.resource,
+    })
+    actions.push(editDocument(mainHandle, { set: patch }))
 
-    // Convert to Sanity patches and send to SDK
-    const patches = this.mapping.toSanityPatch(result)
-    this.adapter.applyPatches(this.docId, this.mapping.documentType, patches)
+    // Write main doc
+    applyDocumentActions(this.instance, { actions, ...(transactionId && { transactionId }) }).catch((err) => {
+      console.error(`[sanity-bridge] main doc write error for ${this.docId}:`, err)
+    })
 
-    return result
+    // Write ref docs separately (edit if exists, create if new)
+    if (refDocs) {
+      for (const ref of refDocs) {
+        const editHandle = createDocumentHandle({
+          documentId: ref.docId,
+          documentType: ref.documentType,
+          ...this.resource,
+        })
+        applyDocumentActions(this.instance, {
+          actions: [editDocument(editHandle, { set: ref.content })],
+        }).catch(() => {
+          // Edit failed (doc doesn't exist yet) — create it
+          const createHandle = createDocumentTypeHandle({
+            documentId: ref.docId,
+            documentType: ref.documentType,
+            ...this.resource,
+          })
+          applyDocumentActions(this.instance, {
+            actions: [createDocument(createHandle, ref.content)],
+          }).catch((err2) => {
+            console.error(`[sanity-bridge] ref doc error for ${ref.docId}:`, err2)
+          })
+        })
+      }
+    }
   }
 
   dispose(): void {

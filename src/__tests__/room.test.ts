@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { Room } from '../server/room'
+
+vi.mock('@sanity/sdk', async () => {
+  const { createSdkMocks } = await import('../testing/mock-sanity')
+  return createSdkMocks()
+})
+
 import { createMockSanity } from '../testing/mock-sanity'
+import { Room } from '../server/room'
 import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { DocumentMapping } from '../mapping'
 import type { ServerMsg, ClientMsg } from '../protocol'
@@ -10,7 +16,7 @@ afterEach(() => { vi.useRealTimers() })
 const testMapping: DocumentMapping<{ value: number }> = {
   documentType: 'test',
   fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { value: state.value } },
+  toSanityPatch(state) { return { patch: { value: state.value } } },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as { value: number }
     return null
@@ -26,7 +32,7 @@ function makeRoom(initialValue = 0) {
       },
       gracePeriodMs: 100,
     },
-    mock.adapter,
+    mock.instance, mock.resource,
   )
   return { room, mock }
 }
@@ -256,7 +262,7 @@ describe('Room', () => {
           beta: { docId: 'doc-b', mapping: testMapping, initialState: { value: 2 } },
         },
       },
-      mock.adapter,
+      mock.instance, mock.resource,
     )
 
     expect(room.getDocState('alpha')).toEqual({ value: 1 })
@@ -300,7 +306,7 @@ describe('Room', () => {
     const refMapping: DocumentMapping<Record<string, unknown>> = {
       documentType: 'asset',
       fromSanity(doc) { return doc },
-      toSanityPatch(state) { return state },
+      toSanityPatch(state) { return { patch: state } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
       },
@@ -309,7 +315,7 @@ describe('Room', () => {
     const parentMapping: DocumentMapping<{ value: number }> = {
       documentType: 'test',
       fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-      toSanityPatch(state) { return { value: state.value } },
+      toSanityPatch(state) { return { patch: { value: state.value } } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as { value: number } : null
       },
@@ -328,7 +334,7 @@ describe('Room', () => {
           main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
         },
       },
-      mock.adapter,
+      mock.instance, mock.resource,
     )
 
     // Wait for initial subscriptions to fire
@@ -363,7 +369,7 @@ describe('Room', () => {
     const refMapping: DocumentMapping<Record<string, unknown>> = {
       documentType: 'asset',
       fromSanity(doc) { return doc },
-      toSanityPatch(state) { return state },
+      toSanityPatch(state) { return { patch: state } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
       },
@@ -372,7 +378,7 @@ describe('Room', () => {
     const parentMapping: DocumentMapping<{ value: number }> = {
       documentType: 'test',
       fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-      toSanityPatch(state) { return { value: state.value } },
+      toSanityPatch(state) { return { patch: { value: state.value } } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as { value: number } : null
       },
@@ -391,7 +397,7 @@ describe('Room', () => {
           main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
         },
       },
-      mock.adapter,
+      mock.instance, mock.resource,
     )
 
     await flushMicrotasks()
@@ -424,7 +430,7 @@ describe('Room', () => {
     const refMapping: DocumentMapping<Record<string, unknown>> = {
       documentType: 'asset',
       fromSanity(doc) { return doc },
-      toSanityPatch(state) { return state },
+      toSanityPatch(state) { return { patch: state } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
       },
@@ -433,7 +439,7 @@ describe('Room', () => {
     const parentMapping: DocumentMapping<{ value: number }> = {
       documentType: 'test',
       fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-      toSanityPatch(state) { return { value: state.value } },
+      toSanityPatch(state) { return { patch: { value: state.value } } },
       applyMutation(_state, mutation) {
         return mutation.kind === 'replace' ? mutation.state as { value: number } : null
       },
@@ -452,7 +458,7 @@ describe('Room', () => {
           main: { docId: 'main-doc', mapping: parentMapping, initialState: { value: 1 } },
         },
       },
-      mock.adapter,
+      mock.instance, mock.resource,
     )
 
     await flushMicrotasks()
