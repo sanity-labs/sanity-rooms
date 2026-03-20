@@ -135,6 +135,13 @@ export class Room {
 
   // ── Domain state access ───────────────────────────────────────────────
 
+  /** Get the Sanity document ID for a doc key (stripped of drafts. prefix). */
+  getDocId(docKey: string): string {
+    const doc = this.docs.get(docKey)
+    if (!doc) throw new Error(`Unknown document key: ${docKey}`)
+    return doc.bridge.docId
+  }
+
   getDocState<T = unknown>(docKey: string): T {
     const doc = this.docs.get(docKey)
     if (doc) return doc.state as T
