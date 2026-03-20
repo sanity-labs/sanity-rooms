@@ -60,7 +60,12 @@ export class RoomManager {
     if (!config) return null
 
     const room = new Room(config, this.instance, this.resource)
-    await room.ready
+    await Promise.race([
+      room.ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`Room ready timeout for ${roomId}`)), 15000)),
+    ]).catch((err) => {
+      console.error(`[room-manager] ${err.message}`)
+    })
     room.onEmpty = () => { this.rooms.delete(roomId) }
     this.rooms.set(roomId, room)
 
