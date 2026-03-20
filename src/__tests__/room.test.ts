@@ -163,7 +163,7 @@ describe('Room', () => {
     expect(room.clientCount).toBe(0)
     const c1 = connectClient(room)
     expect(room.clientCount).toBe(1)
-    const c2 = connectClient(room)
+    connectClient(room)
     expect(room.clientCount).toBe(2)
     room.removeClient(c1.clientId)
     expect(room.clientCount).toBe(1)

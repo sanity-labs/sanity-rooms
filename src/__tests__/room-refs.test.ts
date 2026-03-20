@@ -239,7 +239,6 @@ describe('Room with refs', () => {
           main: {
             docId: 'doc-1',
             mapping: testMapping,
-            initialState: { value: 1, items: [{ name: 'x', data: 'original' }] },
           },
         },
       },
