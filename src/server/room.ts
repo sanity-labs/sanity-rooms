@@ -63,6 +63,7 @@ export class Room {
   private graceTimer: ReturnType<typeof setTimeout> | null = null
   private gracePeriodMs: number
   private disposed = false
+  private holdCount = 0
   private instance: SanityInstance
   private resource: SanityResource
 
@@ -124,14 +125,34 @@ export class Room {
     for (const handler of this.appChannels.values()) {
       handler.onClientLeave?.(clientId, this)
     }
-    if (this.clients.size === 0) {
-      this.graceTimer = setTimeout(() => {
-        if (this.clients.size === 0) this.dispose()
-      }, this.gracePeriodMs)
-    }
+    this.maybeStartGraceTimer()
   }
 
   get clientCount(): number { return this.clients.size }
+
+  /**
+   * Prevent the room from being reclaimed. Each hold() must be paired with
+   * a release(). While held, the grace-period timer will not start even if
+   * all clients disconnect.
+   */
+  hold(): void { this.holdCount++ }
+
+  /**
+   * Release a previous hold(). If no clients remain and no holds are active,
+   * the grace-period timer starts.
+   */
+  release(): void {
+    this.holdCount = Math.max(0, this.holdCount - 1)
+    this.maybeStartGraceTimer()
+  }
+
+  private maybeStartGraceTimer(): void {
+    if (this.clients.size === 0 && this.holdCount === 0) {
+      this.graceTimer = setTimeout(() => {
+        if (this.clients.size === 0 && this.holdCount === 0) this.dispose()
+      }, this.gracePeriodMs)
+    }
+  }
 
   // ── Domain state access ───────────────────────────────────────────────
 
