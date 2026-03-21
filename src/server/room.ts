@@ -105,14 +105,22 @@ export class Room {
     })
     this.clients.set(clientId, { transport, unsubMessage, unsubClose })
 
-    // Send current domain state for all docs
-    for (const [key, doc] of this.docs) {
-      this.sendTo(clientId, { channel: docChannel(key), type: 'state', state: doc.state })
-    }
+    // Wait for all doc bridges to load before sending state — otherwise
+    // the client receives null/empty state and overwrites its good initial data.
+    this.ready.then(() => {
+      // Client may have disconnected while we were waiting
+      if (!this.clients.has(clientId)) return
 
-    for (const handler of this.appChannels.values()) {
-      handler.onClientJoin?.(clientId, this)
-    }
+      for (const [key, doc] of this.docs) {
+        const frames = (doc.state as any)?.frames?.length ?? '?'
+        console.log(`[room] sending state to ${clientId}: ${key} (frames=${frames})`)
+        this.sendTo(clientId, { channel: docChannel(key), type: 'state', state: doc.state })
+      }
+
+      for (const handler of this.appChannels.values()) {
+        handler.onClientJoin?.(clientId, this)
+      }
+    })
     return clientId
   }
 
