@@ -35,14 +35,13 @@ Clients (browser)                         Your Server (Node)
 -----------------                         ------------------
 SyncClient <--+                            Room
   optimistic  |                              +-- SanityBridge per doc (raw doc store)
-  state       |    +----------------+        |     +-- getDocumentState() (SDK)
-  per doc     +----| Transport      |--------+     +-- editDocument() + applyDocumentActions()
-              |    | (pluggable)    |        |     +-- createDocument() for ref docs
-SyncClient <--+    +----------------+        +-- DocumentMapping (domain <-> raw)
-                                             +-- resolveRefs + fromSanityWithRefs (ref assembly)
+  local state |    +----------------+        |     +-- getDocumentState() (SDK)
+  diff at     +----| Transport      |--------+     +-- editDocument() + applyDocumentActions()
+  flush time  |    | (pluggable)    |        +-- DocumentMapping (domain <-> raw)
+SyncClient <--+    +----------------+        +-- resolveRefs + fromSanityWithRefs (ref assembly)
                                              +-- client registry + broadcast
-                                             +-- app channels (chat, etc.)
-                                             +-- Room.ready (waits for all bridges)
+  @sanity/diff-patch (diffValue)             +-- app channels (chat, etc.)
+  @sanity/mutator (apply patches)            +-- Room.ready (waits for all bridges)
                                              +-- grace period lifecycle
 ```
 
@@ -186,13 +185,28 @@ syncClient.subscribeDoc('config', () => {
   setConfig(updated) // React setState, Svelte store, etc.
 })
 
-// Mutate (applied optimistically, sent to server debounced)
+// Mutate — just pass the full new state. SyncClient handles the rest:
+// - Updates localState instantly (optimistic)
+// - At flush time, diffs against lastSentState using @sanity/diff-patch
+// - Sends only changed fields as Sanity-native patch operations
+// - Concurrent edits compose correctly (_key-based array diffs)
 syncClient.mutate('config', { kind: 'replace', state: newConfig })
 
 // App channels (chat, presence, whatever)
 syncClient.sendApp('chat', { text: 'hello' })
 syncClient.onApp('chat', (payload) => handleChat(payload))
 ```
+
+### How diff-at-flush works
+
+The caller sends `{ kind: 'replace', state: fullNewState }` — the simplest possible API. Internally:
+
+1. **Optimistic update** — `localState = newState` immediately. No queue, no diffing.
+2. **Debounce** — rapid edits (slider drags) coalesce into one send.
+3. **Flush** — `diffValue(lastSentState, localState)` from `@sanity/diff-patch` produces `SanityPatchOperations[]`. Only changed fields are sent over the wire.
+4. **Server** — applies patches to its state, writes to Sanity via `toSanityPatch` (handles ref docs), broadcasts full state to other clients.
+5. **External changes** — when the server broadcasts state from another client or AI, `SyncClient` reapplies unsent local changes on top using `@sanity/mutator`. Since patches are per-key and per-array-item (`_key`), concurrent edits to different parts of the document compose correctly.
+6. **Reconnect** — full reset to server state. Unsent local edits are lost (same as any unsaved work).
 
 ## Document references
 
@@ -202,8 +216,9 @@ Custom resources (fonts, palettes, backgrounds) are stored as separate Sanity do
 2. **Ref bridges** — Room auto-subscribes to each ref doc via SDK's shared listener (one connection for all)
 3. **`fromSanityWithRefs(doc, refDocs)`** — assembles the complete domain state from main doc + ref docs
 4. **`toSanityPatch` returns `refPatches`** — ref doc content to write alongside the main doc
-5. **Atomic writes** — ref doc creates + main doc edit go in one `applyDocumentActions` batch
-6. **Weak references** — refs use `_weak: true` + `_strengthenOnPublish` so drafts can reference other drafts
+5. **Atomic writes** — ref doc edits + main doc edit go in one `applyDocumentActions` batch
+6. **Ref doc upsert** — uses `editDocument` (not `createDocument`) for ref docs so existing drafts don't cause batch failures
+7. **Weak references** — refs use `_weak: true` + `_strengthenOnPublish` so drafts can reference other drafts
 
 ## What's NOT here yet
 

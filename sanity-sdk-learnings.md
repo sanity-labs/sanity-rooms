@@ -52,12 +52,12 @@ When you subscribe to a doc via `getDocumentState`, the SDK creates an entry in 
 
 **Don't subscribe to a document before creating it.** Create first, then subscribe.
 
-### `editDocument` vs `createDocument` — neither is universal
+### `editDocument` vs `createDocument`
 
-- `editDocument` throws if the doc doesn't exist (`"Cannot edit document because it does not exist"`)
 - `createDocument` throws if a draft already exists (`"A draft version already exists"`)
+- `editDocument` with `{ set: fields }` works as an **upsert** — it creates the draft if it doesn't exist, updates it if it does. This is the correct choice for ref documents (custom fonts, palettes, backgrounds) where the doc may or may not exist.
 
-There's no `createOrReplace` in the SDK's action system. You need to try one, catch, try the other — or know the state ahead of time.
+**Use `editDocument` for ref docs, not `createDocument`.** Using `createDocument` in a batch with the main doc edit causes the entire batch to fail if the ref doc draft already exists — silently dropping the main doc write too.
 
 ## Server-side reference integrity
 
@@ -127,10 +127,36 @@ Use deep structural comparison (like `immutableReconcile`) to suppress redundant
 
 If your document has references to other documents, the Room's `ready` promise should not resolve until both the main doc AND all ref bridges have emitted. Otherwise the first client gets an incomplete state (refs unresolved).
 
+## Companion packages
+
+### `@sanity/diff-patch` — diffing two document states
+
+`diffValue(before, after)` produces `SanityPatchOperations[]` — the native format `editDocument` accepts. Handles:
+- Object diffs: recurses per-key, only patches changed keys, handles deletions via `unset`
+- Array diffs by `_key`: items with `_key` are diffed by key (not index), so edits to different items produce independent patches
+- String diffs: uses `diffMatchPatch` for text-level diffs (efficient for keystroke edits)
+- Reference equality fast-path: `source === target` → skip (zero cost for unchanged subtrees)
+
+Use this for computing minimal patches on the client before sending over the wire.
+
+### `@sanity/mutator` — applying patches to plain JS objects
+
+`Mutation.apply(doc)` applies Sanity-format patches (set, unset, diffMatchPatch, insert) to a document, including `_key`-based array paths like `frames[_key=="f1"].text`.
+
+To apply `SanityPatchOperations[]` from `diffValue`:
+```typescript
+import { Mutation } from '@sanity/mutator'
+const mutations = operations.map(op => ({ patch: { id: doc._id, ...op } }))
+const result = new Mutation({ mutations }).apply(doc)
+```
+
+**Important:** `Mutation.apply` requires `_id` and `_type` on the document, and the patch `id` must match `_id`. For domain objects without Sanity metadata, inject sentinel values and strip them after.
+
+**Important:** `Mutation.apply` adds `_rev` and `_updatedAt` to the result. Strip these if the original document didn't have them.
+
 ## Missing from the SDK (as of v2.8.0)
 
 - No public API to distinguish local vs remote state changes
-- No `createOrReplace` action
 - No configurable write throttle
 - No server-side usage documentation
 - No way to subscribe to only the `remote` document state
