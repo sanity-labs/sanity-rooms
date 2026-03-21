@@ -1,12 +1,18 @@
 /**
  * SyncClient — transport-agnostic optimistic document store.
  *
- * Manages multiple documents, each with independent optimistic state.
- * Mutations are applied locally immediately, sent to the server debounced,
- * and reconciled when the server confirms or rejects.
+ * For replace mutations (full-state updates from the UI), the client keeps
+ * localState as the optimistic truth and diffs at flush time using
+ * @sanity/diff-patch. This produces granular Sanity-native patches that
+ * compose correctly during concurrent edits (user + AI, multiple clients).
+ *
+ * Named mutations (intent-based, e.g. AI tool calls) still go through the
+ * traditional mutation queue with ack/reject handling.
  */
 
+import { diffValue } from '@sanity/diff-patch'
 import type { Transport } from '../transport'
+import { applySanityPatches } from '../apply-patches'
 import type { Mutation } from '../mutation'
 import type { ClientMsg, ServerMsg } from '../protocol'
 import { isServerMsg } from '../protocol'
@@ -29,9 +35,14 @@ export interface SyncClientOptions {
 interface DocState {
   serverState: unknown
   localState: unknown
+  /** What the server last confirmed — diffs are computed against this at flush time. */
+  lastSentState: unknown
+  /** Queue for named mutations only (AI tool calls). Replace mutations bypass the queue. */
   queue: MutationQueue
   config: DocConfig
   listeners: Set<() => void>
+  /** Whether localState has unsent changes (replace mutations not yet flushed). */
+  dirty: boolean
 }
 
 type StatusListener = (status: 'connected' | 'disconnected') => void
@@ -41,6 +52,7 @@ let nextMutationId = 0
 function generateMutationId(): string {
   return `m_${++nextMutationId}_${Date.now()}`
 }
+
 
 export class SyncClient {
   private docs = new Map<string, DocState>()
@@ -65,9 +77,11 @@ export class SyncClient {
       this.docs.set(docId, {
         serverState: config.initialState,
         localState: config.initialState,
+        lastSentState: config.initialState,
         queue: new MutationQueue(),
         config,
         listeners: new Set(),
+        dirty: false,
       })
     }
 
@@ -101,25 +115,30 @@ export class SyncClient {
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
 
+    if (mutation.kind === 'replace') {
+      // Replace: update local state directly, diff at flush time
+      const prev = doc.localState
+      doc.localState = mutation.state
+      doc.dirty = true
+      if (doc.config.reconcile) {
+        doc.localState = doc.config.reconcile(prev, doc.localState)
+      }
+      for (const listener of doc.listeners) listener()
+      scheduleFlusher(this.flusher, () => this.flush(), this.debounceMs, this.maxWaitMs)
+      return
+    }
+
+    // Named/other mutations: go through the queue (existing behavior)
     const mutationId = generateMutationId()
     doc.queue.enqueue(mutationId, mutation)
     this.recomputeLocal(doc)
 
-    const msg: ClientMsg = {
+    this.pendingSends.push({
       channel: docChannel(docId),
       type: 'mutate',
       mutationId,
       mutation,
-    }
-    // For replace mutations, drop previous pending replaces for the same doc
-    // (only the latest full state matters)
-    if (mutation.kind === 'replace') {
-      const channel = docChannel(docId)
-      this.pendingSends = this.pendingSends.filter(
-        (m) => !(m.type === 'mutate' && m.channel === channel && m.mutation.kind === 'replace'),
-      )
-    }
-    this.pendingSends.push(msg)
+    })
     scheduleFlusher(this.flusher, () => this.flush(), this.debounceMs, this.maxWaitMs)
   }
 
@@ -167,7 +186,7 @@ export class SyncClient {
   // ── Internal ────────────────────────────────────────────────────────────
 
   private handleServerMsg(msg: ServerMsg): void {
-    if (msg.type === 'error') return // App can handle via onApp or ignore
+    if (msg.type === 'error') return
 
     if (!('channel' in msg)) return
     const parsed = parseChannel(msg.channel)
@@ -186,19 +205,48 @@ export class SyncClient {
 
     switch (msg.type) {
       case 'state': {
-        const newState = msg.state
-        doc.serverState = newState
-        this.recomputeLocal(doc)
-        // Mark connected on first state message after reconnect
+        const received = msg.state
+
         if (this._status === 'disconnected') {
+          // Reconnect: full reset — accept server state, discard unsent local edits
+          doc.serverState = received
+          doc.localState = received
+          doc.lastSentState = received
+          doc.dirty = false
+          doc.queue.clear()
+          this.pendingSends = this.pendingSends.filter(
+            (m) => !(m.type === 'mutate' && m.channel === docChannel(parsed.id)),
+          )
           this._status = 'connected'
           for (const listener of this.statusListeners) listener('connected')
+        } else if (doc.dirty) {
+          // Connected + dirty: reapply unsent local changes on top of fresh server state
+          doc.serverState = received
+          const localChanges = diffValue(doc.lastSentState, doc.localState)
+          if (localChanges.length > 0) {
+            doc.localState = applySanityPatches(received, localChanges)
+          } else {
+            doc.localState = received
+            doc.dirty = false
+          }
+          doc.lastSentState = received
+        } else {
+          // Connected + clean: accept server state
+          doc.serverState = received
+          doc.localState = received
+          doc.lastSentState = received
+        }
+
+        // Recompute with any queued named mutations on top
+        if (doc.queue.hasPending()) {
+          this.recomputeLocal(doc)
+        } else {
+          for (const listener of doc.listeners) listener()
         }
         break
       }
       case 'ack': {
         doc.queue.ack(msg.mutationId)
-        // No recompute needed — local state already includes this mutation
         break
       }
       case 'reject': {
@@ -209,6 +257,7 @@ export class SyncClient {
     }
   }
 
+  /** Recompute local state by replaying queued named mutations on server state. */
   private recomputeLocal(doc: DocState): void {
     const prev = doc.localState
     let next = doc.queue.rebase(doc.serverState, doc.config.applyMutation)
@@ -219,7 +268,30 @@ export class SyncClient {
     for (const listener of doc.listeners) listener()
   }
 
+  /** Flush pending sends + diff dirty docs. */
   private flush(): void {
+    // Diff dirty docs and produce sanityPatch mutations
+    for (const [docId, doc] of this.docs) {
+      if (!doc.dirty) continue
+
+      const operations = diffValue(doc.lastSentState, doc.localState)
+      if (operations.length === 0) {
+        doc.dirty = false
+        continue
+      }
+
+      const mutationId = generateMutationId()
+      this.pendingSends.push({
+        channel: docChannel(docId),
+        type: 'mutate',
+        mutationId,
+        mutation: { kind: 'sanityPatch', operations },
+      })
+      doc.lastSentState = doc.localState
+      doc.dirty = false
+    }
+
+    // Send all pending messages
     const msgs = this.pendingSends.splice(0)
     for (const msg of msgs) {
       this.transport.send(msg)

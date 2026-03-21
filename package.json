@@ -44,6 +44,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@sanity/diff-patch": "^6.0.0",
+    "@sanity/mutator": "^5.17.1",
     "@sanity/sdk": "^2.8.0",
     "rxjs": "^7.8.2"
   },

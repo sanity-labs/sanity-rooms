@@ -114,6 +114,28 @@ export class SanityBridge {
     })
   }
 
+  /**
+   * Write Sanity-native patch operations directly (produced by @sanity/diff-patch).
+   * Each SanityPatchOperations object becomes an editDocument action.
+   */
+  writePatch(operations: Array<Record<string, unknown>>, transactionId?: string): void {
+    if (!this.ready) return // patches are transient — don't buffer
+
+    const handle = createDocumentHandle({
+      documentId: this.docId,
+      documentType: this.documentType,
+      ...this.resource,
+    })
+    const actions = operations.map(op => editDocument(handle, op))
+
+    applyDocumentActions(this.instance, {
+      actions,
+      ...(transactionId && { transactionId }),
+    }).catch((err) => {
+      console.error(`[bridge:${this.docId}] writePatch error:`, err.message ?? err)
+    })
+  }
+
   dispose(): void {
     this.unsubscribe?.()
     this.unsubscribe = null

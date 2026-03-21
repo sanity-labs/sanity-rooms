@@ -1,10 +1,37 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { SyncClient } from '../client/sync-client'
 import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
-import type { Mutation } from '../mutation'
-import type { ServerMsg } from '../protocol'
+import type { Mutation, SanityPatchOperations } from '../mutation'
+import { isServerMsg, type ServerMsg } from '../protocol'
+import type { ClientMsg } from '../protocol'
 
 afterEach(() => { vi.useRealTimers() })
+
+/** Access SyncClient internals for testing (private fields). */
+function internals(syncClient: SyncClient) {
+  return syncClient as unknown as {
+    transport: { close(): void }
+    unsubMessage: (() => void) | null
+    handleServerMsg(msg: ServerMsg): void
+  }
+}
+
+/** Simulate disconnect + reconnect, returns new server transport. */
+function simulateReconnect(syncClient: SyncClient) {
+  internals(syncClient).transport.close()
+  const { client: newTransport, server: newServer } = createMemoryTransportPair()
+  const si = internals(syncClient)
+  si.unsubMessage?.()
+  si.unsubMessage = newTransport.onMessage((raw: unknown) => {
+    if (isServerMsg(raw)) si.handleServerMsg(raw)
+  })
+  return newServer
+}
+
+/** Type the raw messages received by the server transport. */
+function asMutateMsg(msg: unknown) {
+  return msg as ClientMsg & { type: 'mutate'; mutationId: string; mutation: Mutation }
+}
 
 function replaceApply(_state: unknown, mutation: Mutation): unknown | null {
   if (mutation.kind === 'replace') return mutation.state
@@ -110,7 +137,7 @@ describe('SyncClient', () => {
     server.onMessage((m) => serverReceived.push(m))
     await vi.advanceTimersByTimeAsync(0) // flush debounce
 
-    const mutationId = (serverReceived[0] as any).mutationId
+    const { mutationId } = asMutateMsg(serverReceived[0])
     server.send({ channel: 'doc:main', type: 'ack', mutationId } satisfies ServerMsg)
     await vi.advanceTimersByTimeAsync(0)
 
@@ -131,7 +158,7 @@ describe('SyncClient', () => {
     server.onMessage((m) => serverReceived.push(m))
     await vi.advanceTimersByTimeAsync(0)
 
-    const mutationId = (serverReceived[0] as any).mutationId
+    const { mutationId } = asMutateMsg(serverReceived[0])
     server.send({
       channel: 'doc:main',
       type: 'reject',
@@ -209,14 +236,12 @@ describe('SyncClient', () => {
 
   it('restores connected status after reconnect state message', async () => {
     vi.useFakeTimers()
-    const { syncClient, server, transport } = makeClient({ count: 0 })
+    const { syncClient } = makeClient({ count: 0 })
 
-    // Connection drops
-    transport.close()
+    const newServer = simulateReconnect(syncClient)
     expect(syncClient.status).toBe('disconnected')
 
-    // Reconnect — server sends fresh state
-    server.send({ channel: 'doc:main', type: 'state', state: { count: 200 } } satisfies ServerMsg)
+    newServer.send({ channel: 'doc:main', type: 'state', state: { count: 200 } } satisfies ServerMsg)
     await vi.advanceTimersByTimeAsync(0)
 
     expect(syncClient.getDocState('main')).toEqual({ count: 200 })
@@ -234,9 +259,199 @@ describe('SyncClient', () => {
     await vi.advanceTimersByTimeAsync(0) // flush debounce
 
     expect(received).toHaveLength(1)
-    expect((received[0] as any).channel).toBe('doc:main')
-    expect((received[0] as any).type).toBe('mutate')
-    expect((received[0] as any).mutation).toEqual({ kind: 'replace', state: { count: 7 } })
+    const sent = asMutateMsg(received[0])
+    expect(sent.channel).toBe('doc:main')
+    expect(sent.type).toBe('mutate')
+    syncClient.dispose()
+  })
+})
+
+// ── Diff-at-flush tests ──────────────────────────────────────────────────
+
+describe('SyncClient diff-at-flush', () => {
+  it('sends only changed fields as sanityPatch at flush time', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server } = makeClient({ a: 1, b: 2, c: 3 })
+    const received: unknown[] = []
+    server.onMessage((m) => received.push(m))
+
+    // Change only key 'a'
+    syncClient.mutate('main', { kind: 'replace', state: { a: 99, b: 2, c: 3 } })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(received).toHaveLength(1)
+    const msg = asMutateMsg(received[0])
+    expect(msg.mutation.kind).toBe('sanityPatch')
+    const ops = (msg.mutation as { kind: 'sanityPatch'; operations: SanityPatchOperations[] }).operations
+    const setOps = ops.find(o => o.set)
+    expect(setOps?.set).toHaveProperty('a', 99)
+    expect(setOps?.set).not.toHaveProperty('b')
+    expect(setOps?.set).not.toHaveProperty('c')
+    syncClient.dispose()
+  })
+
+  it('sends nothing when state is unchanged', async () => {
+    vi.useFakeTimers()
+    const initial = { a: 1, b: 2 }
+    const { syncClient, server } = makeClient(initial)
+    const received: unknown[] = []
+    server.onMessage((m) => received.push(m))
+
+    // "Replace" with identical values
+    syncClient.mutate('main', { kind: 'replace', state: { a: 1, b: 2 } })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // diffValue should produce empty patches → nothing sent
+    expect(received).toHaveLength(0)
+    syncClient.dispose()
+  })
+
+  it('coalesces rapid replaces into single patch', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server } = makeClient({ count: 0 })
+    const received: unknown[] = []
+    server.onMessage((m) => received.push(m))
+
+    // Rapid-fire edits before debounce fires
+    for (let i = 1; i <= 10; i++) {
+      syncClient.mutate('main', { kind: 'replace', state: { count: i } })
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Only one message sent, with the final diff
+    expect(received).toHaveLength(1)
+    const msg = asMutateMsg(received[0])
+    const ops = (msg.mutation as { kind: 'sanityPatch'; operations: SanityPatchOperations[] }).operations
+    const setOp = ops.find(o => o.set)
+    expect(setOp?.set).toHaveProperty('count', 10)
+    syncClient.dispose()
+  })
+
+  it('external state merges with dirty local keys', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server } = makeClient({ a: 1, b: 2, c: 3 })
+
+    // User edits key 'a' locally (dirty, not yet flushed)
+    syncClient.mutate('main', { kind: 'replace', state: { a: 99, b: 2, c: 3 } })
+
+    // Server sends external change to key 'b'
+    server.send({ channel: 'doc:main', type: 'state', state: { a: 1, b: 200, c: 3 } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Local state should have user's 'a' AND server's 'b'
+    const state = syncClient.getDocState<any>('main')
+    expect(state.a).toBe(99) // user's unsent edit preserved
+    expect(state.b).toBe(200) // server's change applied
+    expect(state.c).toBe(3) // unchanged
+    syncClient.dispose()
+  })
+
+  it('external state fully applies when local is clean', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server } = makeClient({ a: 1, b: 2 })
+
+    // No local edits — state is clean
+    server.send({ channel: 'doc:main', type: 'state', state: { a: 10, b: 20 } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(syncClient.getDocState('main')).toEqual({ a: 10, b: 20 })
+    syncClient.dispose()
+  })
+
+  it('reconnect resets to server state', async () => {
+    vi.useFakeTimers()
+    const { syncClient } = makeClient({ a: 1, b: 2 })
+
+    syncClient.mutate('main', { kind: 'replace', state: { a: 99, b: 2 } })
+
+    const newServer = simulateReconnect(syncClient)
+    expect(syncClient.status).toBe('disconnected')
+
+    newServer.send({ channel: 'doc:main', type: 'state', state: { a: 50, b: 100 } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Full reset — local unsent edit lost
+    expect(syncClient.getDocState('main')).toEqual({ a: 50, b: 100 })
+    expect(syncClient.status).toBe('connected')
+    syncClient.dispose()
+  })
+
+  it('reconnect does not revert AI changes (THE BUG)', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server, transport } = makeClient({ frames: ['f1'], cameraTrack: [] })
+
+    // User edits frames
+    syncClient.mutate('main', { kind: 'replace', state: { frames: ['f1', 'f2'], cameraTrack: [] } })
+
+    // Flush to server
+    await vi.advanceTimersByTimeAsync(0)
+
+    // AI adds camera keyframes (server broadcasts)
+    server.send({ channel: 'doc:main', type: 'state', state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Disconnect + reconnect
+    transport.close()
+    server.send({ channel: 'doc:main', type: 'state', state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Camera keyframes must survive — not reverted
+    const state = syncClient.getDocState<any>('main')
+    expect(state.cameraTrack).toEqual(['kf1', 'kf2'])
+    expect(state.frames).toEqual(['f1', 'f2'])
+    syncClient.dispose()
+  })
+
+  it('named mutations still go through queue path', async () => {
+    vi.useFakeTimers()
+    const namedApply = (state: unknown, mutation: Mutation): unknown | null => {
+      if (mutation.kind === 'replace') return mutation.state
+      if (mutation.kind === 'named' && mutation.name === 'increment') {
+        const s = state as { count: number }
+        const input = mutation.input as { by: number }
+        return { count: s.count + input.by }
+      }
+      return null
+    }
+    const { client: transport, server } = createMemoryTransportPair()
+    const syncClient = new SyncClient({
+      transport,
+      documents: { main: { initialState: { count: 0 }, applyMutation: namedApply } },
+      sendDebounce: { ms: 0, maxWaitMs: 0 },
+    })
+    const received: unknown[] = []
+    server.onMessage((m) => received.push(m))
+
+    syncClient.mutate('main', { kind: 'named', name: 'increment', input: { by: 5 } })
+    expect(syncClient.getDocState('main')).toEqual({ count: 5 }) // optimistic
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(received).toHaveLength(1)
+    expect(asMutateMsg(received[0]).mutation.kind).toBe('named') // sent as named, NOT sanityPatch
+    syncClient.dispose()
+  })
+
+  it('array-level composability: edits to different _key items survive', async () => {
+    vi.useFakeTimers()
+    const frame1 = { _key: 'f1', text: 'hello' }
+    const frame2 = { _key: 'f2', text: 'world' }
+    const { syncClient, server } = makeClient({ frames: [frame1, frame2] })
+
+    // User edits frame 1
+    const editedFrame1 = { _key: 'f1', text: 'HELLO' }
+    syncClient.mutate('main', { kind: 'replace', state: { frames: [editedFrame1, frame2] } })
+
+    // Server sends state where AI edited frame 2
+    const aiEditedFrame2 = { _key: 'f2', text: 'WORLD' }
+    server.send({ channel: 'doc:main', type: 'state', state: { frames: [frame1, aiEditedFrame2] } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Both edits should survive
+    const state = syncClient.getDocState<any>('main')
+    expect(state.frames).toEqual([
+      { _key: 'f1', text: 'HELLO' },  // user's edit
+      { _key: 'f2', text: 'WORLD' },  // AI's edit
+    ])
     syncClient.dispose()
   })
 })

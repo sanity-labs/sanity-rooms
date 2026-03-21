@@ -1,6 +1,6 @@
 // Common types and utilities — framework-agnostic, no server/client deps
 export type { Transport, ServerTransport } from './transport'
-export type { Mutation, SanityPatch } from './mutation'
+export type { Mutation, SanityPatchOperations } from './mutation'
 export type {
   ClientMsg,
   ClientMutateMsg,

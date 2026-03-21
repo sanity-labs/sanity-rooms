@@ -13,6 +13,7 @@ import type { ServerTransport } from '../transport'
 import type { Mutation } from '../mutation'
 import type { ClientMsg, ServerMsg } from '../protocol'
 import { isClientMsg } from '../protocol'
+import { applySanityPatches } from '../apply-patches'
 import { docChannel, parseChannel } from '../channel'
 import type { DocumentMapping } from '../mapping'
 import { immutableReconcile } from '../reconcile'
@@ -283,12 +284,7 @@ export class Room {
     // Skip our own write echoes — we know all our transaction IDs
     const rev = rawDoc._rev as string | undefined
     if (rev && doc.ownTxns.has(rev)) {
-      console.log(`[room] ECHO SUPPRESSED: ${key} rev=${rev.slice(0, 12)}`)
       return
-    }
-    if (doc.ownTxns.size > 0) {
-      // We have pending txns but this rev doesn't match — possible revert!
-      console.warn(`[room] ECHO NOT SUPPRESSED: ${key} rev=${rev?.slice(0, 12) ?? 'none'} ownTxns=[${[...doc.ownTxns].map(t => t.slice(0, 12)).join(',')}]`)
     }
 
     // Update ref subscriptions
@@ -306,11 +302,6 @@ export class Room {
     if (reconciled === doc.state) return
 
     // External change — update state and broadcast
-    const prevCam = (doc.state as any)?.cameraTrack?.length ?? 0
-    const nextCam = (reconciled as any)?.cameraTrack?.length ?? 0
-    if (prevCam !== nextCam) {
-      console.warn(`[room] STATE OVERWRITE: ${key} cameraTrack ${prevCam} → ${nextCam} (rev=${rev?.slice(0, 12)})`)
-    }
     doc.state = reconciled
     this.broadcastAll({ channel: docChannel(key), type: 'state', state: reconciled })
 
@@ -410,7 +401,15 @@ export class Room {
         return
       }
 
-      const result = doc.mapping.applyMutation(doc.state, msg.mutation)
+      let result: unknown
+
+      if (msg.mutation.kind === 'sanityPatch') {
+        // Sanity-native patches: apply using @sanity/mutator
+        result = applySanityPatches(doc.state, msg.mutation.operations)
+      } else {
+        result = doc.mapping.applyMutation(doc.state, msg.mutation)
+      }
+
       if (result === null) {
         this.sendTo(clientId, { channel: msg.channel, type: 'reject', mutationId: msg.mutationId, reason: 'Mutation returned null' })
         return
@@ -418,12 +417,18 @@ export class Room {
 
       doc.state = result
 
-      // Write to Sanity — generate txnId BEFORE write so echo suppression works
-      const { patch, refPatches } = doc.mapping.toSanityPatch(result)
-      const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
+      // Write to Sanity
       const txnId = crypto.randomUUID()
       doc.ownTxns.add(txnId)
-      doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
+
+      if (msg.mutation.kind === 'sanityPatch') {
+        // Forward patches directly to Sanity — native format
+        doc.bridge.writePatch(msg.mutation.operations, txnId)
+      } else {
+        const { patch, refPatches } = doc.mapping.toSanityPatch(result)
+        const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
+        doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
+      }
 
       // Broadcast to OTHER clients, ack to sender
       this.broadcastExcept(clientId, { channel: msg.channel, type: 'state', state: result })
