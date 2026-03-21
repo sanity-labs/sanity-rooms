@@ -245,4 +245,70 @@ describe('Room', () => {
     expect(room.clientCount).toBe(1)
     await room.dispose()
   })
+
+  it('sanityPatch mutation writes ref docs to Sanity', async () => {
+    // Mapping with ref doc support — simulates custom backgrounds
+    interface RefState { value: number; refs: Array<{ _ref: string; data: string }> }
+    const refMapping: DocumentMapping<RefState> = {
+      documentType: 'test',
+      fromSanity(doc) {
+        return { value: Number(doc.value ?? 0), refs: (doc.refs ?? []) as RefState['refs'] }
+      },
+      toSanityPatch(state) {
+        const refPatches: Record<string, Record<string, unknown>> = {}
+        for (const ref of state.refs) {
+          refPatches[`ref-${ref._ref}`] = { data: ref.data }
+        }
+        return {
+          patch: { value: state.value, refs: state.refs.map(r => ({ _ref: r._ref })) },
+          refPatches,
+        }
+      },
+      applyMutation(_state, mutation) {
+        if (mutation.kind === 'replace') return mutation.state as RefState
+        return null
+      },
+      resolveRefs(doc) {
+        return ((doc.refs ?? []) as Array<{ _ref: string }>).map(r => ({
+          key: `ref-${r._ref}`,
+          docId: r._ref,
+          mapping: { documentType: 'refDoc', fromSanity: (d: Record<string, unknown>) => d, toSanityPatch: (s: unknown) => ({ patch: s as Record<string, unknown> }), applyMutation: () => null },
+        }))
+      },
+    }
+
+    const mock = createMockSanity({ 'doc-1': { value: 0, refs: [] } })
+    const room = new Room(
+      { documents: { main: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+      mock.instance,
+      mock.resource,
+    )
+    await room.ready
+    const c1 = connectClient(room)
+    await flushMicrotasks()
+    c1.received.length = 0
+
+    // Client sends sanityPatch that adds a ref
+    c1.client.send({
+      channel: 'doc:main',
+      type: 'mutate',
+      mutationId: 'ref-mut-1',
+      mutation: {
+        kind: 'sanityPatch',
+        operations: [{ set: { value: 42, refs: [{ _ref: 'bg-1', data: 'aurora' }] } }],
+      },
+    } satisfies ClientMsg)
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // The ref doc should have been written to Sanity
+    const refDoc = mock.getDoc('bg-1')
+    expect(refDoc).toBeDefined()
+    expect(refDoc?.data).toBe('aurora')
+
+    // Main doc value should also be written
+    expect(mock.getDoc('doc-1')?.value).toBe(42)
+
+    await room.dispose()
+  })
 })

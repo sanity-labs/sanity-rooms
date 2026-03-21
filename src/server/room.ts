@@ -417,18 +417,13 @@ export class Room {
 
       doc.state = result
 
-      // Write to Sanity
+      // Write to Sanity — always use toSanityPatch so ref docs
+      // (custom fonts/palettes/backgrounds) are written alongside the main doc
       const txnId = crypto.randomUUID()
       doc.ownTxns.add(txnId)
-
-      if (msg.mutation.kind === 'sanityPatch') {
-        // Forward patches directly to Sanity — native format
-        doc.bridge.writePatch(msg.mutation.operations, txnId)
-      } else {
-        const { patch, refPatches } = doc.mapping.toSanityPatch(result)
-        const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
-        doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
-      }
+      const { patch, refPatches } = doc.mapping.toSanityPatch(result)
+      const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
+      doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
 
       // Broadcast to OTHER clients, ack to sender
       this.broadcastExcept(clientId, { channel: msg.channel, type: 'state', state: result })
