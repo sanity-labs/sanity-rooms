@@ -25,9 +25,9 @@ export function applySanityPatches(doc: unknown, operations: SanityPatchOperatio
 
   // @sanity/mutator requires _id and _type, and patch id must match doc _id
   const docId = typeof orig._id === 'string' ? orig._id : SYNC_ID
-  const withMeta: MutableRecord = { _id: docId, _type: typeof orig._type === 'string' ? orig._type : SYNC_ID, ...orig }
+  const withMeta = { _id: docId, _type: typeof orig._type === 'string' ? orig._type : SYNC_ID, ...orig }
   const mutations = operations.map(op => ({ patch: { id: docId, ...op } }))
-  const applied = new SanityMutation({ mutations }).apply(withMeta)
+  const applied = new SanityMutation({ mutations }).apply(withMeta as { _id: string; _type: string })
 
   if (!applied) return doc
 
