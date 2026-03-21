@@ -12,10 +12,8 @@
 import {
   getDocumentState,
   editDocument,
-  createDocument,
   applyDocumentActions,
   createDocumentHandle,
-  createDocumentTypeHandle,
   type SanityInstance,
 } from '@sanity/sdk'
 
@@ -96,9 +94,9 @@ export class SanityBridge {
 
     if (refDocs) {
       for (const ref of refDocs) {
-        actions.push(createDocument(
-          createDocumentTypeHandle({ documentId: ref.docId, documentType: ref.documentType, ...this.resource }),
-          ref.content,
+        actions.push(editDocument(
+          createDocumentHandle({ documentId: ref.docId, documentType: ref.documentType, ...this.resource }),
+          { set: ref.content },
         ))
       }
     }

@@ -112,8 +112,6 @@ export class Room {
       if (!this.clients.has(clientId)) return
 
       for (const [key, doc] of this.docs) {
-        const frames = (doc.state as any)?.frames?.length ?? '?'
-        console.log(`[room] sending state to ${clientId}: ${key} (frames=${frames})`)
         this.sendTo(clientId, { channel: docChannel(key), type: 'state', state: doc.state })
       }
 
@@ -285,9 +283,12 @@ export class Room {
     // Skip our own write echoes — we know all our transaction IDs
     const rev = rawDoc._rev as string | undefined
     if (rev && doc.ownTxns.has(rev)) {
-      // Our own write — don't touch domain state, don't create ref subscriptions
-      // (ref bridges are created when the server confirms, via a later non-own echo)
+      console.log(`[room] ECHO SUPPRESSED: ${key} rev=${rev.slice(0, 12)}`)
       return
+    }
+    if (doc.ownTxns.size > 0) {
+      // We have pending txns but this rev doesn't match — possible revert!
+      console.warn(`[room] ECHO NOT SUPPRESSED: ${key} rev=${rev?.slice(0, 12) ?? 'none'} ownTxns=[${[...doc.ownTxns].map(t => t.slice(0, 12)).join(',')}]`)
     }
 
     // Update ref subscriptions
@@ -305,6 +306,11 @@ export class Room {
     if (reconciled === doc.state) return
 
     // External change — update state and broadcast
+    const prevCam = (doc.state as any)?.cameraTrack?.length ?? 0
+    const nextCam = (reconciled as any)?.cameraTrack?.length ?? 0
+    if (prevCam !== nextCam) {
+      console.warn(`[room] STATE OVERWRITE: ${key} cameraTrack ${prevCam} → ${nextCam} (rev=${rev?.slice(0, 12)})`)
+    }
     doc.state = reconciled
     this.broadcastAll({ channel: docChannel(key), type: 'state', state: reconciled })
 
@@ -387,6 +393,7 @@ export class Room {
   // ── Internal: client messages ─────────────────────────────────────────
 
   private handleClientMsg(clientId: string, msg: ClientMsg): void {
+    if (this.disposed) return
     const parsed = parseChannel(msg.channel)
 
     if (parsed.type === 'app' || msg.type === 'app') {

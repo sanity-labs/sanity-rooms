@@ -207,6 +207,23 @@ describe('SyncClient', () => {
     syncClient.dispose()
   })
 
+  it('restores connected status after reconnect state message', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server, transport } = makeClient({ count: 0 })
+
+    // Connection drops
+    transport.close()
+    expect(syncClient.status).toBe('disconnected')
+
+    // Reconnect — server sends fresh state
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 200 } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(syncClient.getDocState('main')).toEqual({ count: 200 })
+    expect(syncClient.status).toBe('connected')
+    syncClient.dispose()
+  })
+
   it('sends mutations to server', async () => {
     vi.useFakeTimers()
     const { syncClient, server } = makeClient()

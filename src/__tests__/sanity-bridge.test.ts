@@ -83,6 +83,31 @@ describe('SanityBridge', () => {
     bridge.dispose()
   })
 
+  it('write with refDocs uses editDocument not createDocument (Bug #3)', async () => {
+    const mock = createMockSanity({ 'doc-1': { value: 1 }, 'ref-1': { name: 'existing' } })
+    const bridge = new SanityBridge({
+      instance: mock.instance,
+      resource: mock.resource,
+      docId: 'doc-1',
+      documentType: 'test',
+      onChange: () => {},
+    })
+    await flushMicrotasks()
+
+    // Write main doc + ref doc (ref doc already exists as draft)
+    bridge.write(
+      { value: 2 },
+      [{ docId: 'ref-1', documentType: 'customFont', content: { name: 'updated' } }],
+    )
+    await flushMicrotasks()
+
+    // Main doc should be updated
+    expect(mock.getDoc('doc-1')?.value).toBe(2)
+    // Ref doc should be updated (not fail because it already exists)
+    expect(mock.getDoc('ref-1')?.name).toBe('updated')
+    bridge.dispose()
+  })
+
   it('dispose stops onChange', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const onChange = vi.fn()

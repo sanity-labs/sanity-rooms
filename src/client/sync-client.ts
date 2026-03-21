@@ -189,6 +189,11 @@ export class SyncClient {
         const newState = msg.state
         doc.serverState = newState
         this.recomputeLocal(doc)
+        // Mark connected on first state message after reconnect
+        if (this._status === 'disconnected') {
+          this._status = 'connected'
+          for (const listener of this.statusListeners) listener('connected')
+        }
         break
       }
       case 'ack': {

@@ -53,6 +53,82 @@ describe('Room', () => {
     await room.dispose()
   })
 
+  it('does not send null state before bridge has loaded (Bug #1)', async () => {
+    // Create room WITHOUT awaiting ready — connect client immediately
+    const mock = createMockSanity() // no initial docs → bridge hasn't emitted yet
+    const room = new Room(
+      { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
+      mock.instance,
+      mock.resource,
+    )
+    // Connect BEFORE ready resolves
+    const { received } = connectClient(room)
+    await flushMicrotasks()
+
+    // Should NOT have received a state message with null
+    const nullState = received.find((m) => m.type === 'state' && (m as any).state === null)
+    expect(nullState).toBeUndefined()
+
+    // Now simulate the bridge loading the doc
+    mock.simulateExternalEdit('doc-1', { value: 100 })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // NOW client should receive the real state
+    const stateMsg = received.find((m) => m.type === 'state' && (m as any).state?.value === 100)
+    expect(stateMsg).toBeDefined()
+    await room.dispose()
+  })
+
+  it('own write echoes do not reset state (Bug #2)', async () => {
+    const { room } = await makeRoom(10)
+    const c1 = connectClient(room)
+    await flushMicrotasks()
+    c1.received.length = 0
+
+    // Server-side mutation (like AI tool call)
+    room.mutateDoc('main', { kind: 'replace', state: { value: 999 } })
+    expect(room.getDocState('main')).toEqual({ value: 999 })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // The write echo comes back from the mock SDK — should be suppressed
+    // State should still be 999, not reset to the echo value
+    expect(room.getDocState('main')).toEqual({ value: 999 })
+
+    // Client should have received value=999 (from mutateDoc broadcast),
+    // NOT a second state message reverting it
+    const stateMessages = c1.received.filter((m) => m.type === 'state')
+    expect(stateMessages.length).toBe(1)
+    expect((stateMessages[0] as any).state).toEqual({ value: 999 })
+    await room.dispose()
+  })
+
+  it('client disconnecting before ready does not crash', async () => {
+    const mock = createMockSanity()
+    const room = new Room(
+      { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
+      mock.instance,
+      mock.resource,
+    )
+    const { client, server } = createMemoryTransportPair()
+    const received: ServerMsg[] = []
+    client.onMessage((m) => received.push(m as ServerMsg))
+    const clientId = room.addClient(server)
+
+    // Disconnect before ready resolves
+    room.removeClient(clientId)
+
+    // Now let the bridge load
+    mock.simulateExternalEdit('doc-1', { value: 42 })
+    await room.ready
+    await flushMicrotasks()
+
+    // Should not have sent anything to the disconnected client
+    expect(received.filter((m) => m.type === 'state')).toHaveLength(0)
+    await room.dispose()
+  })
+
   it('client mutation → ack to sender, state to others', async () => {
     const { room } = await makeRoom(0)
     const c1 = connectClient(room)

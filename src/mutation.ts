@@ -11,6 +11,7 @@ export type Mutation =
   | { kind: 'replace'; state: unknown }
   | { kind: 'named'; name: string; input: unknown }
   | { kind: 'patch'; patches: SanityPatch[] }
+  | { kind: 'merge'; partial: Record<string, unknown> }
 
 export interface SanityPatch {
   op: 'set' | 'unset' | 'inc' | 'dec' | 'insert'
