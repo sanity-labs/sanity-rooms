@@ -5,6 +5,8 @@
 
 Transport-agnostic, optimistic document synchronization for Sanity. Provides multi-client rooms with real-time broadcast, a document mapping layer, and app-defined channels — on top of `@sanity/sdk`'s document store and shared listener.
 
+**Git subtree** — upstream repo: [`sanity-labs/sanity-rooms`](https://github.com/sanity-labs/sanity-rooms). See [CLAUDE.md](./CLAUDE.md) for subtree push instructions.
+
 ## What this is
 
 A coordination layer between `@sanity/sdk` (Sanity connection) and your app (multiple clients editing documents). It handles:
