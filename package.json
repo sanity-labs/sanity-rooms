@@ -13,25 +13,29 @@
   ],
   "exports": {
     ".": {
-      "@morphing-clock/source": "./src/index.ts",
+      "development": "./src/index.ts",
+      "source": "./src/index.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js"
     },
     "./server": {
-      "@morphing-clock/source": "./src/server/index.ts",
+      "development": "./src/server/index.ts",
+      "source": "./src/server/index.ts",
       "import": "./dist/server/index.js",
       "require": "./dist/server/index.cjs",
       "default": "./dist/server/index.js"
     },
     "./client": {
-      "@morphing-clock/source": "./src/client/index.ts",
+      "development": "./src/client/index.ts",
+      "source": "./src/client/index.ts",
       "import": "./dist/client/index.js",
       "require": "./dist/client/index.cjs",
       "default": "./dist/client/index.js"
     },
     "./testing": {
-      "@morphing-clock/source": "./src/testing/index.ts",
+      "development": "./src/testing/index.ts",
+      "source": "./src/testing/index.ts",
       "import": "./dist/testing/index.js",
       "require": "./dist/testing/index.cjs",
       "default": "./dist/testing/index.js"
