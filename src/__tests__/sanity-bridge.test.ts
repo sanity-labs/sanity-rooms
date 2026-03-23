@@ -83,7 +83,7 @@ describe('SanityBridge', () => {
     bridge.dispose()
   })
 
-  it('write with refDocs uses editDocument not createDocument (Bug #3)', async () => {
+  it('write with existing ref doc edits without creating', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 }, 'ref-1': { name: 'existing' } })
     const bridge = new SanityBridge({
       instance: mock.instance,
@@ -94,16 +94,94 @@ describe('SanityBridge', () => {
     })
     await flushMicrotasks()
 
-    // Write main doc + ref doc (ref doc already exists as draft)
+    // Tell the bridge ref-1 already exists in Sanity
+    bridge.markRefDocKnown('ref-1')
+
     bridge.write(
       { value: 2 },
       [{ docId: 'ref-1', documentType: 'customFont', content: { name: 'updated' } }],
     )
     await flushMicrotasks()
 
-    // Main doc should be updated
     expect(mock.getDoc('doc-1')?.value).toBe(2)
-    // Ref doc should be updated (not fail because it already exists)
+    expect(mock.getDoc('ref-1')?.name).toBe('updated')
+    bridge.dispose()
+  })
+
+  it('write with new ref doc creates then edits transparently', async () => {
+    const mock = createMockSanity({ 'doc-1': { value: 1 } })
+    const bridge = new SanityBridge({
+      instance: mock.instance,
+      resource: mock.resource,
+      docId: 'doc-1',
+      documentType: 'test',
+      onChange: () => {},
+    })
+    await flushMicrotasks()
+
+    // ref doc doesn't exist — bridge should create + edit automatically
+    bridge.write(
+      { value: 2 },
+      [{ docId: 'new-ref', documentType: 'customBackground', content: { name: 'new bg' } }],
+    )
+    await flushMicrotasks()
+
+    expect(mock.getDoc('doc-1')?.value).toBe(2)
+    expect(mock.getDoc('new-ref')?.name).toBe('new bg')
+    expect(mock.getDoc('new-ref')?._id).toBe('new-ref')
+    bridge.dispose()
+  })
+
+  it('second write to same ref doc skips create', async () => {
+    const mock = createMockSanity({ 'doc-1': { value: 1 } })
+    const bridge = new SanityBridge({
+      instance: mock.instance,
+      resource: mock.resource,
+      docId: 'doc-1',
+      documentType: 'test',
+      onChange: () => {},
+    })
+    await flushMicrotasks()
+
+    // First write — creates the ref doc
+    bridge.write(
+      { value: 2 },
+      [{ docId: 'new-ref', documentType: 'customBackground', content: { name: 'v1' } }],
+    )
+    await flushMicrotasks()
+    expect(mock.getDoc('new-ref')?.name).toBe('v1')
+
+    // Second write — should NOT try createDocument again (would throw "already exists")
+    bridge.write(
+      { value: 3 },
+      [{ docId: 'new-ref', documentType: 'customBackground', content: { name: 'v2' } }],
+    )
+    await flushMicrotasks()
+    expect(mock.getDoc('new-ref')?.name).toBe('v2')
+    bridge.dispose()
+  })
+
+  it('markRefDocKnown prevents unnecessary create on existing docs', async () => {
+    const mock = createMockSanity({ 'doc-1': { value: 1 }, 'ref-1': { name: 'existing' } })
+    const bridge = new SanityBridge({
+      instance: mock.instance,
+      resource: mock.resource,
+      docId: 'doc-1',
+      documentType: 'test',
+      onChange: () => {},
+    })
+    await flushMicrotasks()
+
+    // Without markRefDocKnown, writing would try createDocument on an existing doc → fail
+    // With it, the bridge knows to skip createDocument
+    bridge.markRefDocKnown('ref-1')
+
+    bridge.write(
+      { value: 2 },
+      [{ docId: 'ref-1', documentType: 'customFont', content: { name: 'updated' } }],
+    )
+    await flushMicrotasks()
+
     expect(mock.getDoc('ref-1')?.name).toBe('updated')
     bridge.dispose()
   })

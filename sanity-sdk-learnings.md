@@ -55,9 +55,10 @@ When you subscribe to a doc via `getDocumentState`, the SDK creates an entry in 
 ### `editDocument` vs `createDocument`
 
 - `createDocument` throws if a draft already exists (`"A draft version already exists"`)
-- `editDocument` with `{ set: fields }` works as an **upsert** — it creates the draft if it doesn't exist, updates it if it does. This is the correct choice for ref documents (custom fonts, palettes, backgrounds) where the doc may or may not exist.
+- `editDocument` **requires the doc to exist** in draft or published form — it throws `"Cannot edit document because it does not exist in draft or published form"` otherwise. It is NOT an upsert.
+- `createDocument` + `editDocument` in the same `applyDocumentActions` batch WORKS — the create runs first, then the edit sees the newly created draft.
 
-**Use `editDocument` for ref docs, not `createDocument`.** Using `createDocument` in a batch with the main doc edit causes the entire batch to fail if the ref doc draft already exists — silently dropping the main doc write too.
+**For ref docs that may or may not exist:** batch `createDocument(handle)` before `editDocument(handle, { set: ... })`. If the doc already exists, skip the `createDocument`. The bridge must track which ref docs have been created to choose the right action.
 
 ## Server-side reference integrity
 

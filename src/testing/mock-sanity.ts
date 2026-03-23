@@ -39,7 +39,7 @@ export function createMockSanity(
 
   if (initialDocs) {
     for (const [id, doc] of Object.entries(initialDocs)) {
-      docs.set(id, { doc: { ...doc }, subscribers: new Set() })
+      docs.set(id, { doc: { _id: id, ...doc }, subscribers: new Set() })
     }
   }
 
@@ -144,11 +144,19 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
     applyDocumentActions: async (inst: any, options: any) => {
       const transactionId: string = options.transactionId ?? `txn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
+      // Track which docs are created in this batch (for create-then-edit in same batch)
+      const createdInBatch = new Set<string>()
+
       for (const action of options.actions ?? []) {
         const docId = action.documentId
         const entry = inst._getOrCreateEntry(docId)
 
         if (action.type === 'document.edit') {
+          // Real SDK: editDocument fails if doc doesn't exist
+          const docExists = createdInBatch.has(docId) || (entry.doc._id !== undefined)
+          if (!docExists) {
+            throw new Error('Cannot edit document because it does not exist in draft or published form.')
+          }
           for (const patch of action.patches ?? []) {
             if (patch.set) {
               Object.assign(entry.doc, patch.set)
@@ -161,10 +169,15 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
             }
           }
         } else if (action.type === 'document.create') {
+          // Real SDK: createDocument fails if draft already exists
+          if (entry.doc._id !== undefined) {
+            throw new Error('A draft version of this document already exists.')
+          }
           Object.assign(entry.doc, action.initialValue ?? {}, {
             _type: action.documentType,
             _id: docId,
           })
+          createdInBatch.add(docId)
         }
 
         // Set _rev like the real SDK does

@@ -455,3 +455,126 @@ describe('SyncClient diff-at-flush', () => {
     syncClient.dispose()
   })
 })
+
+// ── Hydration tests ───────────────────────────────────────────────────────
+
+function makeUnhydratedClient() {
+  const { client: transport, server } = createMemoryTransportPair()
+  const syncClient = new SyncClient({
+    transport,
+    documents: {
+      main: { applyMutation: replaceApply },
+    },
+    sendDebounce: { ms: 0, maxWaitMs: 0 },
+  })
+  return { syncClient, server, transport }
+}
+
+describe('SyncClient hydration', () => {
+  it('ready resolves immediately when all docs have initialState', async () => {
+    const { syncClient } = makeClient({ count: 0 })
+    await syncClient.ready // should not hang
+    expect(syncClient.isHydrated).toBe(true)
+    syncClient.dispose()
+  })
+
+  it('ready resolves after server sends state for unhydrated doc', async () => {
+    const { syncClient, server } = makeUnhydratedClient()
+    expect(syncClient.isHydrated).toBe(false)
+
+    let resolved = false
+    syncClient.ready.then(() => { resolved = true })
+    await flushMicrotasks()
+    expect(resolved).toBe(false)
+
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 42 } } satisfies ServerMsg)
+    await flushMicrotasks()
+
+    expect(resolved).toBe(true)
+    expect(syncClient.isHydrated).toBe(true)
+    syncClient.dispose()
+  })
+
+  it('getDocState throws before hydration', () => {
+    const { syncClient } = makeUnhydratedClient()
+    expect(() => syncClient.getDocState('main')).toThrow('not hydrated')
+    syncClient.dispose()
+  })
+
+  it('mutate throws before hydration', () => {
+    const { syncClient } = makeUnhydratedClient()
+    expect(() => syncClient.mutate('main', { kind: 'replace', state: { count: 1 } })).toThrow('before hydration')
+    syncClient.dispose()
+  })
+
+  it('getDocState works after hydration', async () => {
+    const { syncClient, server } = makeUnhydratedClient()
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 99 } } satisfies ServerMsg)
+    await flushMicrotasks()
+
+    expect(syncClient.getDocState('main')).toEqual({ count: 99 })
+    syncClient.dispose()
+  })
+
+  it('subscribers notified on hydration', async () => {
+    const { syncClient, server } = makeUnhydratedClient()
+    const listener = vi.fn()
+    syncClient.subscribeDoc('main', listener)
+
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 1 } } satisfies ServerMsg)
+    await flushMicrotasks()
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    syncClient.dispose()
+  })
+
+  it('mixed docs: ready waits for all unhydrated docs', async () => {
+    const { client: transport, server } = createMemoryTransportPair()
+    const syncClient = new SyncClient({
+      transport,
+      documents: {
+        hydrated: { initialState: 'ready', applyMutation: replaceApply },
+        pending: { applyMutation: replaceApply },
+      },
+      sendDebounce: { ms: 0, maxWaitMs: 0 },
+    })
+
+    expect(syncClient.isHydrated).toBe(false)
+    expect(syncClient.isDocHydrated('hydrated')).toBe(true)
+    expect(syncClient.isDocHydrated('pending')).toBe(false)
+
+    let resolved = false
+    syncClient.ready.then(() => { resolved = true })
+    await flushMicrotasks()
+    expect(resolved).toBe(false)
+
+    server.send({ channel: 'doc:pending', type: 'state', state: 'loaded' } satisfies ServerMsg)
+    await flushMicrotasks()
+
+    expect(resolved).toBe(true)
+    expect(syncClient.isHydrated).toBe(true)
+    expect(syncClient.getDocState('pending')).toBe('loaded')
+    expect(syncClient.getDocState('hydrated')).toBe('ready')
+    syncClient.dispose()
+  })
+
+  it('mutations work normally after hydration', async () => {
+    vi.useFakeTimers()
+    const { syncClient, server } = makeUnhydratedClient()
+
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 10 } } satisfies ServerMsg)
+    await vi.advanceTimersByTimeAsync(0)
+
+    syncClient.mutate('main', { kind: 'replace', state: { count: 20 } })
+    expect(syncClient.getDocState('main')).toEqual({ count: 20 })
+
+    // Flush should produce a sanityPatch
+    const received: unknown[] = []
+    server.onMessage((m) => received.push(m))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(received).toHaveLength(1)
+    expect(asMutateMsg(received[0]).mutation.kind).toBe('sanityPatch')
+    syncClient.dispose()
+  })
+})

@@ -8,6 +8,10 @@
  *
  * Named mutations (intent-based, e.g. AI tool calls) still go through the
  * traditional mutation queue with ack/reject handling.
+ *
+ * Hydration: when `initialState` is omitted, the doc starts unhydrated.
+ * The `ready` promise resolves once all docs receive their first `state`
+ * message from the server. Mutations are blocked until hydration completes.
  */
 
 import { diffValue } from '@sanity/diff-patch'
@@ -20,8 +24,11 @@ import { docChannel, parseChannel } from '../channel'
 import { type DebouncedFlusher, createFlusher, clearFlusher, scheduleFlusher } from '../debounce'
 import { MutationQueue } from './mutation-queue'
 
+const UNHYDRATED = Symbol('unhydrated')
+
 export interface DocConfig {
-  initialState: unknown
+  /** Initial state. Omit to wait for the server's first `state` message. */
+  initialState?: unknown
   applyMutation: (state: unknown, mutation: Mutation) => unknown | null
   reconcile?: (prev: unknown, next: unknown) => unknown
 }
@@ -43,6 +50,8 @@ interface DocState {
   listeners: Set<() => void>
   /** Whether localState has unsent changes (replace mutations not yet flushed). */
   dirty: boolean
+  /** Whether this doc has received its initial state (from constructor or server). */
+  hydrated: boolean
 }
 
 type StatusListener = (status: 'connected' | 'disconnected') => void
@@ -67,6 +76,10 @@ export class SyncClient {
   private debounceMs: number
   private maxWaitMs: number
   private disposed = false
+  private _resolveReady: (() => void) | null = null
+
+  /** Resolves when all docs have received their initial state. */
+  readonly ready: Promise<void>
 
   constructor(options: SyncClientOptions) {
     this.transport = options.transport
@@ -74,15 +87,23 @@ export class SyncClient {
     this.maxWaitMs = options.sendDebounce?.maxWaitMs ?? 1000
 
     for (const [docId, config] of Object.entries(options.documents)) {
+      const hasInitial = config.initialState !== undefined
       this.docs.set(docId, {
-        serverState: config.initialState,
-        localState: config.initialState,
-        lastSentState: config.initialState,
+        serverState: hasInitial ? config.initialState : UNHYDRATED,
+        localState: hasInitial ? config.initialState : UNHYDRATED,
+        lastSentState: hasInitial ? config.initialState : UNHYDRATED,
         queue: new MutationQueue(),
         config,
         listeners: new Set(),
         dirty: false,
+        hydrated: hasInitial,
       })
+    }
+
+    if ([...this.docs.values()].every(d => d.hydrated)) {
+      this.ready = Promise.resolve()
+    } else {
+      this.ready = new Promise(resolve => { this._resolveReady = resolve })
     }
 
     this.unsubMessage = this.transport.onMessage((raw) => {
@@ -99,6 +120,7 @@ export class SyncClient {
   getDocState<T = unknown>(docId: string): T {
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
+    if (!doc.hydrated) throw new Error(`Document "${docId}" not hydrated — await client.ready`)
     return doc.localState as T
   }
 
@@ -109,11 +131,24 @@ export class SyncClient {
     return () => { doc.listeners.delete(listener) }
   }
 
+  // ── Hydration ─────────────────────────────────────────────────────────
+
+  get isHydrated(): boolean {
+    return [...this.docs.values()].every(d => d.hydrated)
+  }
+
+  isDocHydrated(docId: string): boolean {
+    const doc = this.docs.get(docId)
+    if (!doc) throw new Error(`Unknown document: ${docId}`)
+    return doc.hydrated
+  }
+
   // ── Mutations ───────────────────────────────────────────────────────────
 
   mutate(docId: string, mutation: Mutation): void {
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
+    if (!doc.hydrated) throw new Error(`Cannot mutate "${docId}" before hydration — await client.ready`)
 
     if (mutation.kind === 'replace') {
       // Replace: update local state directly, diff at flush time
@@ -207,6 +242,20 @@ export class SyncClient {
       case 'state': {
         const received = msg.state
 
+        if (!doc.hydrated) {
+          // First state message — hydrate
+          doc.serverState = received
+          doc.localState = received
+          doc.lastSentState = received
+          doc.hydrated = true
+          for (const listener of doc.listeners) listener()
+          if ([...this.docs.values()].every(d => d.hydrated)) {
+            this._resolveReady?.()
+            this._resolveReady = null
+          }
+          break
+        }
+
         if (this._status === 'disconnected') {
           // Reconnect: full reset — accept server state, discard unsent local edits
           doc.serverState = received
@@ -259,6 +308,7 @@ export class SyncClient {
 
   /** Recompute local state by replaying queued named mutations on server state. */
   private recomputeLocal(doc: DocState): void {
+    if (!doc.hydrated) return
     const prev = doc.localState
     let next = doc.queue.rebase(doc.serverState, doc.config.applyMutation)
     if (doc.config.reconcile) {
@@ -272,7 +322,7 @@ export class SyncClient {
   private flush(): void {
     // Diff dirty docs and produce sanityPatch mutations
     for (const [docId, doc] of this.docs) {
-      if (!doc.dirty) continue
+      if (!doc.hydrated || !doc.dirty) continue
 
       const operations = diffValue(doc.lastSentState, doc.localState)
       if (operations.length === 0) {

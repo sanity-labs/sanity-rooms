@@ -12,6 +12,7 @@
 import {
   getDocumentState,
   editDocument,
+  createDocument,
   applyDocumentActions,
   createDocumentHandle,
   type SanityInstance,
@@ -46,6 +47,8 @@ export class SanityBridge {
   private unsubscribe: (() => void) | null = null
   private ready = false
   private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: RefDocWrite[]; transactionId?: string }> = []
+  /** Ref doc IDs we've already created — skip createDocument for these. */
+  private knownRefDocs = new Set<string>()
 
   constructor(options: SanityBridgeOptions) {
     this.instance = options.instance
@@ -79,6 +82,11 @@ export class SanityBridge {
     return this.rawDoc
   }
 
+  /** Mark a ref doc as already existing in Sanity — prevents createDocument on next write. */
+  markRefDocKnown(docId: string): void {
+    this.knownRefDocs.add(docId.replace(/^drafts\./, ''))
+  }
+
   /**
    * Write raw patches to the main doc, optionally creating ref docs atomically.
    * Ref doc creates go first in the action batch so they exist when the main doc
@@ -94,10 +102,15 @@ export class SanityBridge {
 
     if (refDocs) {
       for (const ref of refDocs) {
-        actions.push(editDocument(
-          createDocumentHandle({ documentId: ref.docId, documentType: ref.documentType, ...this.resource }),
-          { set: ref.content },
-        ))
+        const refHandle = createDocumentHandle({ documentId: ref.docId, documentType: ref.documentType, ...this.resource })
+        // editDocument fails on non-existent docs — create first if new.
+        // knownRefDocs tracks docs we've already created, so we only
+        // create once. Subsequent writes just edit.
+        if (!this.knownRefDocs.has(ref.docId)) {
+          actions.push(createDocument(refHandle))
+          this.knownRefDocs.add(ref.docId)
+        }
+        actions.push(editDocument(refHandle, { set: ref.content }))
       }
     }
 

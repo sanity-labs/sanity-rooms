@@ -285,6 +285,9 @@ export class Room {
   /**
    * Called when the SDK emits a raw doc change (our own write echo OR external edit).
    * Maps the raw doc to domain state, compares with current state, broadcasts if different.
+   *
+   * If ref bridges exist but haven't loaded yet, defers mapping — broadcasting
+   * with incomplete refs would strip custom resources from the domain state.
    */
   private handleSanityChange(key: string, rawDoc: Record<string, unknown>): void {
     const doc = this.docs.get(key)
@@ -300,6 +303,11 @@ export class Room {
     if (doc.mapping.resolveRefs) {
       this.updateRefs(key, doc.mapping, rawDoc)
     }
+
+    // If any ref bridges haven't loaded yet, defer — mapping with incomplete
+    // refs would produce state missing custom resources. The ref bridge's
+    // onChange will re-trigger this method once it loads.
+    if (this.hasUnloadedRefs(key)) return
 
     // Map to domain state (with refs if available)
     const mapped = doc.mapping.fromSanityWithRefs
@@ -343,13 +351,16 @@ export class Room {
 
     for (const [refKey, desc] of desiredKeys) {
       if (!current.has(refKey)) {
+        const parentDoc = this.docs.get(parentKey)
         const refBridge = new SanityBridge({
           instance: this.instance,
           resource: this.resource,
           docId: desc.docId,
           documentType: desc.mapping.documentType,
           onChange: (_refDoc) => {
-            // Ref doc changed — re-assemble parent state
+            // Ref doc loaded — tell the parent bridge it exists (so writes use edit, not create)
+            parentDoc?.bridge.markRefDocKnown(desc.docId)
+            // Re-assemble parent state with the now-loaded ref
             this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {})
           },
         })
@@ -357,6 +368,16 @@ export class Room {
       }
     }
     this.updatingRefs.delete(parentKey)
+  }
+
+  /** True if any ref bridge for this parent hasn't emitted its first state yet. */
+  private hasUnloadedRefs(parentKey: string): boolean {
+    const refMap = this.refBridges.get(parentKey)
+    if (!refMap) return false
+    for (const bridge of refMap.values()) {
+      if (Object.keys(bridge.getRawDoc()).length === 0) return true
+    }
+    return false
   }
 
   private getRefDocStates(parentKey: string): Map<string, Record<string, unknown>> {
