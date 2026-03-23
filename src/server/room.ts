@@ -75,7 +75,7 @@ export class Room {
   /** Resolves when all doc bridges have received their first state from the SDK. */
   readonly ready: Promise<void[]>
 
-  onEmpty: (() => void) | null = null
+  private onDisposeListeners: Array<() => void> = []
 
   constructor(config: RoomConfig, instance: SanityInstance, resource: SanityResource) {
     this.instance = instance
@@ -142,6 +142,14 @@ export class Room {
    * a release(). While held, the grace-period timer will not start even if
    * all clients disconnect.
    */
+  /**
+   * Register a callback that fires when the room is disposed.
+   * Multiple listeners are supported — all fire in registration order.
+   */
+  onDispose(cb: () => void): void {
+    this.onDisposeListeners.push(cb)
+  }
+
   hold(): void { this.holdCount++ }
 
   /**
@@ -229,7 +237,8 @@ export class Room {
     }
     this.clients.clear()
     this.appChannels.clear()
-    this.onEmpty?.()
+    for (const cb of this.onDisposeListeners) cb()
+    this.onDisposeListeners.length = 0
   }
 
   // ── Internal: doc setup ───────────────────────────────────────────────

@@ -200,29 +200,29 @@ describe('Room', () => {
   it('grace period disposes after timeout', async () => {
     vi.useFakeTimers()
     const { room } = await makeRoom(0)
-    const onEmpty = vi.fn()
-    room.onEmpty = onEmpty
+    const onDispose = vi.fn()
+    room.onDispose(onDispose)
     const c1 = connectClient(room)
     room.removeClient(c1.clientId)
-    expect(onEmpty).not.toHaveBeenCalled()
+    expect(onDispose).not.toHaveBeenCalled()
     vi.advanceTimersByTime(100)
-    expect(onEmpty).toHaveBeenCalled()
+    expect(onDispose).toHaveBeenCalled()
   })
 
   it('grace period cancelled by reconnection', async () => {
     vi.useFakeTimers()
     const { room } = await makeRoom(0)
-    const onEmpty = vi.fn()
-    room.onEmpty = onEmpty
+    const onDispose = vi.fn()
+    room.onDispose(onDispose)
     const c1 = connectClient(room)
     room.removeClient(c1.clientId)
     vi.advanceTimersByTime(50)
     const c2 = connectClient(room)
     vi.advanceTimersByTime(100)
-    expect(onEmpty).not.toHaveBeenCalled()
+    expect(onDispose).not.toHaveBeenCalled()
     room.removeClient(c2.clientId)
     vi.advanceTimersByTime(100)
-    expect(onEmpty).toHaveBeenCalled()
+    expect(onDispose).toHaveBeenCalled()
   })
 
   it('getDocState and mutateDoc', async () => {

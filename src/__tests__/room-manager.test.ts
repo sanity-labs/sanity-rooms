@@ -88,4 +88,46 @@ describe('RoomManager', () => {
     vi.useRealTimers()
     await manager.dispose()
   })
+
+  it('reclaims room correctly when consumer also registers onDispose', async () => {
+    vi.useFakeTimers()
+    const mock = createMockSanity({ 'doc-1': { value: 42 } })
+    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+
+    // Consumer adds their own onDispose (like the app layer does)
+    const room1 = await manager.getOrCreate('r1')
+    expect(room1).not.toBeNull()
+    let externalCleanupCalled = false
+    room1!.onDispose(() => { externalCleanupCalled = true })
+
+    // Add and remove client to trigger grace timer
+    const { server: s1 } = createMemoryTransportPair()
+    room1!.addClient(s1)
+    room1!.removeClient(s1.clientId)
+
+    // Grace timer fires — room should be disposed and removed from manager
+    vi.advanceTimersByTime(100)
+    expect(manager.get('r1')).toBeUndefined()
+    expect(externalCleanupCalled).toBe(true)
+
+    // Reclaim: creating same room again should return a FRESH, working room
+    vi.useRealTimers()
+    const room2 = await manager.getOrCreate('r1')
+    expect(room2).not.toBeNull()
+    expect(room2).not.toBe(room1)
+
+    // The new room should be functional — client gets state
+    const { server: s2, client: c2 } = createMemoryTransportPair()
+    const received: any[] = []
+    c2.onMessage((msg) => { received.push(msg) })
+    room2!.addClient(s2)
+
+    // Wait for ready + state delivery
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const stateMsg = received.find(m => m.type === 'state')
+    expect(stateMsg).toBeDefined()
+    expect(stateMsg.state).toEqual({ value: 42 })
+
+    await manager.dispose()
+  })
 })

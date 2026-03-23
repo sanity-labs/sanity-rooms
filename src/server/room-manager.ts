@@ -70,7 +70,7 @@ export class RoomManager {
       room.dispose()
       return null
     }
-    room.onEmpty = () => { this.rooms.delete(roomId) }
+    room.onDispose(() => { this.rooms.delete(roomId) })
     this.rooms.set(roomId, room)
 
     return room
