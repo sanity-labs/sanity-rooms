@@ -1,22 +1,28 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@sanity/sdk', async () => {
   const { createSdkMocks } = await import('../testing/mock-sanity')
   return createSdkMocks()
 })
 
-import { createMockSanity } from '../testing/mock-sanity'
+import type { DocumentMapping } from '../mapping'
+import type { ClientMsg, ServerMsg } from '../protocol'
 import { Room } from '../server/room'
 import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
-import type { DocumentMapping } from '../mapping'
-import type { ServerMsg, ClientMsg } from '../protocol'
+import { createMockSanity } from '../testing/mock-sanity'
 
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 const testMapping: DocumentMapping<{ value: number }> = {
   documentType: 'test',
-  fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { patch: { value: state.value } } },
+  fromSanity(doc) {
+    return { value: Number(doc.value ?? 0) }
+  },
+  toSanityPatch(state) {
+    return { patch: { value: state.value } }
+  },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as { value: number }
     return null
@@ -137,7 +143,12 @@ describe('Room', () => {
     c1.received.length = 0
     c2.received.length = 0
 
-    c1.client.send({ channel: 'doc:main', type: 'mutate', mutationId: 'mut-1', mutation: { kind: 'replace', state: { value: 99 } } } satisfies ClientMsg)
+    c1.client.send({
+      channel: 'doc:main',
+      type: 'mutate',
+      mutationId: 'mut-1',
+      mutation: { kind: 'replace', state: { value: 99 } },
+    } satisfies ClientMsg)
     await flushMicrotasks()
     await flushMicrotasks()
 
@@ -167,7 +178,12 @@ describe('Room', () => {
     await flushMicrotasks()
     c1.received.length = 0
 
-    c1.client.send({ channel: 'doc:main', type: 'mutate', mutationId: 'bad', mutation: { kind: 'named', name: 'x', input: {} } } satisfies ClientMsg)
+    c1.client.send({
+      channel: 'doc:main',
+      type: 'mutate',
+      mutationId: 'bad',
+      mutation: { kind: 'named', name: 'x', input: {} },
+    } satisfies ClientMsg)
     await flushMicrotasks()
     await flushMicrotasks()
 
@@ -179,7 +195,10 @@ describe('Room', () => {
     const { room } = await makeRoom(0)
     const handler = vi.fn()
     room.registerAppChannel('chat', {
-      onMessage(clientId, payload, r) { handler(clientId, payload); r.broadcastApp('chat', { echo: payload }, clientId) },
+      onMessage(clientId, payload, r) {
+        handler(clientId, payload)
+        r.broadcastApp('chat', { echo: payload }, clientId)
+      },
     })
     const c1 = connectClient(room)
     const c2 = connectClient(room)
@@ -248,7 +267,10 @@ describe('Room', () => {
 
   it('sanityPatch mutation writes ref docs to Sanity', async () => {
     // Mapping with ref doc support — simulates custom backgrounds
-    interface RefState { value: number; refs: Array<{ _ref: string; data: string }> }
+    interface RefState {
+      value: number
+      refs: Array<{ _ref: string; data: string }>
+    }
     const refMapping: DocumentMapping<RefState> = {
       documentType: 'test',
       fromSanity(doc) {
@@ -260,7 +282,7 @@ describe('Room', () => {
           refPatches[`ref-${ref._ref}`] = { data: ref.data }
         }
         return {
-          patch: { value: state.value, refs: state.refs.map(r => ({ _ref: r._ref })) },
+          patch: { value: state.value, refs: state.refs.map((r) => ({ _ref: r._ref })) },
           refPatches,
         }
       },
@@ -269,10 +291,15 @@ describe('Room', () => {
         return null
       },
       resolveRefs(doc) {
-        return ((doc.refs ?? []) as Array<{ _ref: string }>).map(r => ({
+        return ((doc.refs ?? []) as Array<{ _ref: string }>).map((r) => ({
           key: `ref-${r._ref}`,
           docId: r._ref,
-          mapping: { documentType: 'refDoc', fromSanity: (d: Record<string, unknown>) => d, toSanityPatch: (s: unknown) => ({ patch: s as Record<string, unknown> }), applyMutation: () => null },
+          mapping: {
+            documentType: 'refDoc',
+            fromSanity: (d: Record<string, unknown>) => d,
+            toSanityPatch: (s: unknown) => ({ patch: s as Record<string, unknown> }),
+            applyMutation: () => null,
+          },
         }))
       },
     }

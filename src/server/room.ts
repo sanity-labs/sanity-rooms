@@ -9,21 +9,21 @@
  * except through the mapping functions.
  */
 
-import type { ServerTransport } from '../transport'
-import type { Mutation } from '../mutation'
-import type { ClientMsg, ServerMsg } from '../protocol'
-import { isClientMsg } from '../protocol'
+import {
+  applyDocumentActions,
+  createDocumentHandle,
+  type DocumentAction,
+  publishDocument,
+  type SanityInstance,
+} from '@sanity/sdk'
 import { applySanityPatches } from '../apply-patches'
 import { docChannel, parseChannel } from '../channel'
 import type { DocumentMapping } from '../mapping'
+import type { Mutation } from '../mutation'
+import type { ClientMsg, ServerMsg } from '../protocol'
+import { isClientMsg } from '../protocol'
 import { immutableReconcile } from '../reconcile'
-import {
-  publishDocument,
-  createDocumentHandle,
-  applyDocumentActions,
-  type SanityInstance,
-  type DocumentAction,
-} from '@sanity/sdk'
+import type { ServerTransport } from '../transport'
 import { SanityBridge, type SanityResource } from './sanity-bridge'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -142,7 +142,9 @@ export class Room {
     this.maybeStartGraceTimer()
   }
 
-  get clientCount(): number { return this.clients.size }
+  get clientCount(): number {
+    return this.clients.size
+  }
 
   /**
    * Prevent the room from being reclaimed. Each hold() must be paired with
@@ -162,7 +164,9 @@ export class Room {
     this.onMutationListeners.push(cb)
   }
 
-  hold(): void { this.holdCount++ }
+  hold(): void {
+    this.holdCount++
+  }
 
   /**
    * Release a previous hold(). If no clients remain and no holds are active,
@@ -238,24 +242,28 @@ export class Room {
     const refMap = this.refBridges.get(docKey)
     if (refMap) {
       for (const refBridge of refMap.values()) {
-        actions.push(publishDocument(
-          createDocumentHandle({
-            documentId: refBridge.docId,
-            documentType: refBridge.documentType,
-            ...this.resource,
-          }),
-        ))
+        actions.push(
+          publishDocument(
+            createDocumentHandle({
+              documentId: refBridge.docId,
+              documentType: refBridge.documentType,
+              ...this.resource,
+            }),
+          ),
+        )
       }
     }
 
     // 2. Publish main doc
-    actions.push(publishDocument(
-      createDocumentHandle({
-        documentId: doc.bridge.docId,
-        documentType: doc.bridge.documentType,
-        ...this.resource,
-      }),
-    ))
+    actions.push(
+      publishDocument(
+        createDocumentHandle({
+          documentId: doc.bridge.docId,
+          documentType: doc.bridge.documentType,
+          ...this.resource,
+        }),
+      ),
+    )
 
     try {
       const result = await applyDocumentActions(this.instance, { actions })
@@ -289,7 +297,10 @@ export class Room {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null }
+    if (this.graceTimer) {
+      clearTimeout(this.graceTimer)
+      this.graceTimer = null
+    }
     for (const doc of this.docs.values()) doc.bridge.dispose()
     this.docs.clear()
     for (const [, refMap] of this.refBridges) {
@@ -297,7 +308,9 @@ export class Room {
     }
     this.refBridges.clear()
     for (const client of this.clients.values()) {
-      client.unsubMessage(); client.unsubClose(); client.transport.close()
+      client.unsubMessage()
+      client.unsubClose()
+      client.transport.close()
     }
     this.clients.clear()
     this.appChannels.clear()
@@ -392,11 +405,7 @@ export class Room {
 
   // ── Internal: ref following ───────────────────────────────────────────
 
-  private updateRefs(
-    parentKey: string,
-    mapping: DocumentMapping<unknown>,
-    rawDoc: Record<string, unknown>,
-  ): void {
+  private updateRefs(parentKey: string, mapping: DocumentMapping<unknown>, rawDoc: Record<string, unknown>): void {
     if (!mapping.resolveRefs) return
     if (this.updatingRefs.has(parentKey)) return
     this.updatingRefs.add(parentKey)
@@ -410,7 +419,10 @@ export class Room {
     }
 
     for (const [refKey, bridge] of current) {
-      if (!desiredKeys.has(refKey)) { bridge.dispose(); current.delete(refKey) }
+      if (!desiredKeys.has(refKey)) {
+        bridge.dispose()
+        current.delete(refKey)
+      }
     }
 
     for (const [refKey, desc] of desiredKeys) {
@@ -464,7 +476,7 @@ export class Room {
   ): Array<{ docId: string; documentType: string; content: Record<string, unknown> }> | undefined {
     if (!refPatches || !mapping.resolveRefs) return undefined
     const refs = mapping.resolveRefs(patch)
-    const refMap = new Map(refs.map(r => [r.key, r]))
+    const refMap = new Map(refs.map((r) => [r.key, r]))
     const writes: Array<{ docId: string; documentType: string; content: Record<string, unknown> }> = []
     for (const [refKey, content] of Object.entries(refPatches)) {
       const desc = refMap.get(refKey)
@@ -491,7 +503,12 @@ export class Room {
     if (parsed.type === 'doc' && msg.type === 'mutate') {
       const doc = this.docs.get(parsed.id)
       if (!doc) {
-        this.sendTo(clientId, { channel: msg.channel, type: 'reject', mutationId: msg.mutationId, reason: `Unknown document: ${parsed.id}` })
+        this.sendTo(clientId, {
+          channel: msg.channel,
+          type: 'reject',
+          mutationId: msg.mutationId,
+          reason: `Unknown document: ${parsed.id}`,
+        })
         return
       }
 
@@ -505,7 +522,12 @@ export class Room {
       }
 
       if (result === null) {
-        this.sendTo(clientId, { channel: msg.channel, type: 'reject', mutationId: msg.mutationId, reason: 'Mutation returned null' })
+        this.sendTo(clientId, {
+          channel: msg.channel,
+          type: 'reject',
+          mutationId: msg.mutationId,
+          reason: 'Mutation returned null',
+        })
         return
       }
 

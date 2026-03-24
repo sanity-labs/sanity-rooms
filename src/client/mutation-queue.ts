@@ -40,10 +40,7 @@ export class MutationQueue {
    * Returns the final state after all pending mutations are replayed.
    * Mutations that fail to apply (return null) are silently dropped.
    */
-  rebase<T>(
-    serverState: T,
-    applyMutation: (state: T, mutation: Mutation) => T | null,
-  ): T {
+  rebase<T>(serverState: T, applyMutation: (state: T, mutation: Mutation) => T | null): T {
     let state = serverState
     const surviving: PendingMutation[] = []
 

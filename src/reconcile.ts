@@ -11,9 +11,7 @@ function isPlainObject(obj: unknown): boolean {
   return obj !== null && typeof obj === 'object' && obj.constructor === Object
 }
 
-interface ImmutableReconcile<T> {
-  (prev: T | null, curr: T): T
-}
+type ImmutableReconcile<T> = (prev: T | null, curr: T) => T
 
 export interface CreateImmutableReconcileOptions {
   decorator?: <T>(fn: ImmutableReconcile<T>) => ImmutableReconcile<T>
@@ -32,9 +30,7 @@ export function createImmutableReconcile({
     if (typeof prev !== 'object' || typeof curr !== 'object') return curr
 
     if (Array.isArray(prev) && Array.isArray(curr)) {
-      const reconciled = curr.map((item, index) =>
-        index < prev.length ? immutableReconcile(prev[index], item) : item,
-      )
+      const reconciled = curr.map((item, index) => (index < prev.length ? immutableReconcile(prev[index], item) : item))
       if (prev.length === curr.length && reconciled.every((item, index) => item === prev[index])) {
         return prev
       }

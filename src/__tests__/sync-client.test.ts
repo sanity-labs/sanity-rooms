@@ -1,11 +1,13 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SyncClient } from '../client/sync-client'
-import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { Mutation, SanityPatchOperations } from '../mutation'
-import { isServerMsg, type ServerMsg } from '../protocol'
 import type { ClientMsg } from '../protocol'
+import { isServerMsg, type ServerMsg } from '../protocol'
+import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 /** Access SyncClient internals for testing (private fields). */
 function internals(syncClient: SyncClient) {
@@ -283,7 +285,7 @@ describe('SyncClient diff-at-flush', () => {
     const msg = asMutateMsg(received[0])
     expect(msg.mutation.kind).toBe('sanityPatch')
     const ops = (msg.mutation as { kind: 'sanityPatch'; operations: SanityPatchOperations[] }).operations
-    const setOps = ops.find(o => o.set)
+    const setOps = ops.find((o) => o.set)
     expect(setOps?.set).toHaveProperty('a', 99)
     expect(setOps?.set).not.toHaveProperty('b')
     expect(setOps?.set).not.toHaveProperty('c')
@@ -322,7 +324,7 @@ describe('SyncClient diff-at-flush', () => {
     expect(received).toHaveLength(1)
     const msg = asMutateMsg(received[0])
     const ops = (msg.mutation as { kind: 'sanityPatch'; operations: SanityPatchOperations[] }).operations
-    const setOp = ops.find(o => o.set)
+    const setOp = ops.find((o) => o.set)
     expect(setOp?.set).toHaveProperty('count', 10)
     syncClient.dispose()
   })
@@ -387,12 +389,20 @@ describe('SyncClient diff-at-flush', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     // AI adds camera keyframes (server broadcasts)
-    server.send({ channel: 'doc:main', type: 'state', state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] } } satisfies ServerMsg)
+    server.send({
+      channel: 'doc:main',
+      type: 'state',
+      state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] },
+    } satisfies ServerMsg)
     await vi.advanceTimersByTimeAsync(0)
 
     // Disconnect + reconnect
     transport.close()
-    server.send({ channel: 'doc:main', type: 'state', state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] } } satisfies ServerMsg)
+    server.send({
+      channel: 'doc:main',
+      type: 'state',
+      state: { frames: ['f1', 'f2'], cameraTrack: ['kf1', 'kf2'] },
+    } satisfies ServerMsg)
     await vi.advanceTimersByTimeAsync(0)
 
     // Camera keyframes must survive — not reverted
@@ -449,8 +459,8 @@ describe('SyncClient diff-at-flush', () => {
     // Both edits should survive
     const state = syncClient.getDocState<any>('main')
     expect(state.frames).toEqual([
-      { _key: 'f1', text: 'HELLO' },  // user's edit
-      { _key: 'f2', text: 'WORLD' },  // AI's edit
+      { _key: 'f1', text: 'HELLO' }, // user's edit
+      { _key: 'f2', text: 'WORLD' }, // AI's edit
     ])
     syncClient.dispose()
   })
@@ -483,7 +493,9 @@ describe('SyncClient hydration', () => {
     expect(syncClient.isHydrated).toBe(false)
 
     let resolved = false
-    syncClient.ready.then(() => { resolved = true })
+    syncClient.ready.then(() => {
+      resolved = true
+    })
     await flushMicrotasks()
     expect(resolved).toBe(false)
 
@@ -544,7 +556,9 @@ describe('SyncClient hydration', () => {
     expect(syncClient.isDocHydrated('pending')).toBe(false)
 
     let resolved = false
-    syncClient.ready.then(() => { resolved = true })
+    syncClient.ready.then(() => {
+      resolved = true
+    })
     await flushMicrotasks()
     expect(resolved).toBe(false)
 

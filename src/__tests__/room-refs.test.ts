@@ -2,7 +2,7 @@
  * Room ref-following tests — verifies that custom resources survive
  * the full round-trip: client mutation → Room → SDK echo → fromSanityWithRefs.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 // Mock @sanity/sdk — must use dynamic import in factory to avoid hoisting issues
 vi.mock('@sanity/sdk', async () => {
@@ -10,11 +10,11 @@ vi.mock('@sanity/sdk', async () => {
   return createSdkMocks()
 })
 
-import { Room } from '../server/room'
-import { createMockSanity } from '../testing/mock-sanity'
-import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { DocumentMapping, RefDescriptor, SanityPatchResult } from '../mapping'
 import type { ServerMsg } from '../protocol'
+import { Room } from '../server/room'
+import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
+import { createMockSanity } from '../testing/mock-sanity'
 
 // ── Test mappings ───────────────────────────────────────────────────────────
 
@@ -25,10 +25,14 @@ interface TestConfig {
 
 const itemMapping: DocumentMapping<Record<string, unknown>> = {
   documentType: 'item',
-  fromSanity(doc) { return doc },
-  toSanityPatch(state) { return { patch: state } },
+  fromSanity(doc) {
+    return doc
+  },
+  toSanityPatch(state) {
+    return { patch: state }
+  },
   applyMutation(_state, mutation) {
-    return mutation.kind === 'replace' ? mutation.state as Record<string, unknown> : null
+    return mutation.kind === 'replace' ? (mutation.state as Record<string, unknown>) : null
   },
 }
 
@@ -54,7 +58,7 @@ const testMapping: DocumentMapping<TestConfig> = {
     }
   },
   applyMutation(_state, mutation) {
-    return mutation.kind === 'replace' ? mutation.state as TestConfig : null
+    return mutation.kind === 'replace' ? (mutation.state as TestConfig) : null
   },
   resolveRefs(doc) {
     const refs: RefDescriptor[] = []

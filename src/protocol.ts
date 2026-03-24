@@ -30,11 +30,7 @@ export interface ClientAppMsg {
   payload: unknown
 }
 
-export type ClientMsg =
-  | ClientMutateMsg
-  | ClientSubscribeMsg
-  | ClientUnsubscribeMsg
-  | ClientAppMsg
+export type ClientMsg = ClientMutateMsg | ClientSubscribeMsg | ClientUnsubscribeMsg | ClientAppMsg
 
 // ── Server → Client ─────────────────────────────────────────────────────────
 

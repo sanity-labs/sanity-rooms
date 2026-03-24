@@ -10,11 +10,11 @@
  */
 
 import {
-  getDocumentState,
-  editDocument,
-  createDocument,
   applyDocumentActions,
+  createDocument,
   createDocumentHandle,
+  editDocument,
+  getDocumentState,
   type SanityInstance,
 } from '@sanity/sdk'
 
@@ -102,7 +102,11 @@ export class SanityBridge {
 
     if (refDocs) {
       for (const ref of refDocs) {
-        const refHandle = createDocumentHandle({ documentId: ref.docId, documentType: ref.documentType, ...this.resource })
+        const refHandle = createDocumentHandle({
+          documentId: ref.docId,
+          documentType: ref.documentType,
+          ...this.resource,
+        })
         // editDocument fails on non-existent docs — create first if new.
         // knownRefDocs tracks docs we've already created, so we only
         // create once. Subsequent writes just edit.
@@ -114,10 +118,12 @@ export class SanityBridge {
       }
     }
 
-    actions.push(editDocument(
-      createDocumentHandle({ documentId: this.docId, documentType: this.documentType, ...this.resource }),
-      { set: patch },
-    ))
+    actions.push(
+      editDocument(
+        createDocumentHandle({ documentId: this.docId, documentType: this.documentType, ...this.resource }),
+        { set: patch },
+      ),
+    )
 
     applyDocumentActions(this.instance, {
       actions,
@@ -139,7 +145,7 @@ export class SanityBridge {
       documentType: this.documentType,
       ...this.resource,
     })
-    const actions = operations.map(op => editDocument(handle, op))
+    const actions = operations.map((op) => editDocument(handle, op))
 
     applyDocumentActions(this.instance, {
       actions,

@@ -1,27 +1,35 @@
 /**
  * Integration tests — full round-trip: SyncClient ↔ Room via MemoryTransport.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@sanity/sdk', async () => {
   const { createSdkMocks } = await import('../testing/mock-sanity')
   return createSdkMocks()
 })
 
-import { createMockSanity } from '../testing/mock-sanity'
-import { Room, type RoomConfig } from '../server/room'
 import { SyncClient } from '../client/sync-client'
-import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { DocumentMapping } from '../mapping'
+import { Room, type RoomConfig } from '../server/room'
+import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
+import { createMockSanity } from '../testing/mock-sanity'
 
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => {
+  vi.useRealTimers()
+})
 
-interface Counter { value: number }
+interface Counter {
+  value: number
+}
 
 const counterMapping: DocumentMapping<Counter> = {
   documentType: 'counter',
-  fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { patch: { value: state.value } } },
+  fromSanity(doc) {
+    return { value: Number(doc.value ?? 0) }
+  },
+  toSanityPatch(state) {
+    return { patch: { value: state.value } }
+  },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as Counter
     return null
@@ -47,7 +55,10 @@ function connectSyncClient(room: Room, initialValue = 0) {
     documents: {
       counter: {
         initialState: { value: initialValue },
-        applyMutation: counterMapping.applyMutation as (state: unknown, mutation: import('../mutation').Mutation) => unknown | null,
+        applyMutation: counterMapping.applyMutation as (
+          state: unknown,
+          mutation: import('../mutation').Mutation,
+        ) => unknown | null,
       },
     },
     sendDebounce: { ms: 0, maxWaitMs: 0 },

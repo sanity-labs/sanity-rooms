@@ -2,24 +2,28 @@
  * Room.publish() tests — verifies publishing main docs and ref docs
  * through the SDK's publishDocument + applyDocumentActions.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('@sanity/sdk', async () => {
   const { createSdkMocks } = await import('../testing/mock-sanity')
   return createSdkMocks()
 })
 
-import { Room } from '../server/room'
-import { createMockSanity } from '../testing/mock-sanity'
-import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
 import type { DocumentMapping, RefDescriptor, SanityPatchResult } from '../mapping'
+import { Room } from '../server/room'
+import { createMemoryTransportPair, flushMicrotasks } from '../testing/memory-transport'
+import { createMockSanity } from '../testing/mock-sanity'
 
 // ── Simple mapping (no refs) ─────────────────────────────────────────────
 
 const simpleMapping: DocumentMapping<{ value: number }> = {
   documentType: 'test',
-  fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { patch: { value: state.value } } },
+  fromSanity(doc) {
+    return { value: Number(doc.value ?? 0) }
+  },
+  toSanityPatch(state) {
+    return { patch: { value: state.value } }
+  },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as { value: number }
     return null
@@ -35,9 +39,15 @@ interface RefState {
 
 const itemMapping: DocumentMapping<Record<string, unknown>> = {
   documentType: 'item',
-  fromSanity(doc) { return doc },
-  toSanityPatch(state) { return { patch: state } },
-  applyMutation() { return null },
+  fromSanity(doc) {
+    return doc
+  },
+  toSanityPatch(state) {
+    return { patch: state }
+  },
+  applyMutation() {
+    return null
+  },
 }
 
 const refMapping: DocumentMapping<RefState> = {
@@ -46,7 +56,7 @@ const refMapping: DocumentMapping<RefState> = {
     return { value: Number(doc.value ?? 0), items: (doc.items ?? []) as any[] }
   },
   fromSanityWithRefs(doc, refDocs) {
-    const items = ((doc.items ?? []) as Array<{ _ref: string }>).map(ref => {
+    const items = ((doc.items ?? []) as Array<{ _ref: string }>).map((ref) => {
       const refDoc = refDocs.get(`item-${ref._ref}`)
       return refDoc ? { name: String(refDoc.name), data: String(refDoc.data) } : { name: ref._ref, data: '' }
     })
@@ -70,7 +80,7 @@ const refMapping: DocumentMapping<RefState> = {
     }
   },
   applyMutation(_state, mutation) {
-    return mutation.kind === 'replace' ? mutation.state as RefState : null
+    return mutation.kind === 'replace' ? (mutation.state as RefState) : null
   },
   resolveRefs(doc) {
     const refs: RefDescriptor[] = []
@@ -161,13 +171,15 @@ describe('Room.publish', () => {
     const mock = createMockSanity({
       'doc-1': {
         value: 1,
-        items: [{
-          _ref: 'item-x',
-          _key: 'k0',
-          _type: 'reference',
-          _weak: true,
-          _strengthenOnPublish: { type: 'item', weak: false },
-        }],
+        items: [
+          {
+            _ref: 'item-x',
+            _key: 'k0',
+            _type: 'reference',
+            _weak: true,
+            _strengthenOnPublish: { type: 'item', weak: false },
+          },
+        ],
       },
     })
 

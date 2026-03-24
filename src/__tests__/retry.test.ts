@@ -1,9 +1,13 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { retry } from '../retry'
 
 describe('retry', () => {
   it('returns on first success', async () => {
-    const result = await retry(() => Promise.resolve(42), () => true, vi.fn())
+    const result = await retry(
+      () => Promise.resolve(42),
+      () => true,
+      vi.fn(),
+    )
     expect(result).toBe(42)
   })
 
@@ -24,7 +28,11 @@ describe('retry', () => {
 
   it('throws immediately when shouldRetry returns false', async () => {
     await expect(
-      retry(() => Promise.reject(new Error('fatal')), () => false, vi.fn()),
+      retry(
+        () => Promise.reject(new Error('fatal')),
+        () => false,
+        vi.fn(),
+      ),
     ).rejects.toThrow('fatal')
   })
 
@@ -47,7 +55,12 @@ describe('retry', () => {
 
   it('throws after maxAttempts exhausted', async () => {
     await expect(
-      retry(() => Promise.reject(new Error('fail')), () => true, vi.fn(), 2),
+      retry(
+        () => Promise.reject(new Error('fail')),
+        () => true,
+        vi.fn(),
+        2,
+      ),
     ).rejects.toThrow('fail')
   })
 })

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { immutableReconcile } from '../reconcile'
 
 describe('immutableReconcile', () => {
@@ -29,7 +29,10 @@ describe('immutableReconcile', () => {
   it('handles arrays — preserves unchanged element refs', () => {
     const item = { id: 1, name: 'foo' }
     const prev = [item, { id: 2, name: 'bar' }]
-    const curr = [{ id: 1, name: 'foo' }, { id: 2, name: 'baz' }]
+    const curr = [
+      { id: 1, name: 'foo' },
+      { id: 2, name: 'baz' },
+    ]
     const result = immutableReconcile(prev, curr)
     expect(result[0]).toBe(item)
     expect(result[1]).not.toBe(prev[1])

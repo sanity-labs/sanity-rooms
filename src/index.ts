@@ -1,26 +1,27 @@
 // Common types and utilities — framework-agnostic, no server/client deps
-export type { Transport, ServerTransport } from './transport'
+
+export type { ParsedChannel } from './channel'
+export { docChannel, parseChannel, queryChannel } from './channel'
+export type { DebouncedFlusher } from './debounce'
+export { clearFlusher, createFlusher, scheduleFlusher } from './debounce'
+export type { DocumentMapping, RefDescriptor, SanityPatchResult } from './mapping'
 export type { Mutation, SanityPatchOperations } from './mutation'
 export type {
+  ClientAppMsg,
   ClientMsg,
   ClientMutateMsg,
   ClientSubscribeMsg,
   ClientUnsubscribeMsg,
-  ClientAppMsg,
-  ServerMsg,
-  ServerStateMsg,
   ServerAckMsg,
-  ServerRejectMsg,
-  ServerQueryResultMsg,
   ServerAppMsg,
   ServerErrorMsg,
+  ServerMsg,
+  ServerQueryResultMsg,
+  ServerRejectMsg,
+  ServerStateMsg,
 } from './protocol'
 export { isClientMsg, isServerMsg } from './protocol'
-export type { DocumentMapping, RefDescriptor, SanityPatchResult } from './mapping'
-export type { ParsedChannel } from './channel'
-export { docChannel, queryChannel, parseChannel } from './channel'
-export type { DebouncedFlusher } from './debounce'
-export { createFlusher, clearFlusher, scheduleFlusher } from './debounce'
-export { immutableReconcile, createImmutableReconcile } from './reconcile'
 export type { CreateImmutableReconcileOptions } from './reconcile'
+export { createImmutableReconcile, immutableReconcile } from './reconcile'
 export { retry } from './retry'
+export type { ServerTransport, Transport } from './transport'

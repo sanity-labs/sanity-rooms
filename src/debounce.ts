@@ -24,12 +24,7 @@ export function clearFlusher(f: DebouncedFlusher): void {
   f.pending = false
 }
 
-export function scheduleFlusher(
-  f: DebouncedFlusher,
-  flush: () => void,
-  debounceMs: number,
-  maxWaitMs: number,
-): void {
+export function scheduleFlusher(f: DebouncedFlusher, flush: () => void, debounceMs: number, maxWaitMs: number): void {
   f.pending = true
   if (f.timer) clearTimeout(f.timer)
   const wrappedFlush = () => {

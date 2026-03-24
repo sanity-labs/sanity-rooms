@@ -42,9 +42,7 @@ export interface MockSanityInstance {
  * the mock functions before importing the modules under test. See the
  * test files for the pattern.
  */
-export function createMockSanity(
-  initialDocs?: Record<string, Record<string, unknown>>,
-): MockSanityInstance {
+export function createMockSanity(initialDocs?: Record<string, Record<string, unknown>>): MockSanityInstance {
   const docs = new Map<string, DocEntry>()
   const patchLog = new Map<string, Array<Record<string, unknown>>>()
 
@@ -159,7 +157,8 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
     }),
 
     applyDocumentActions: async (inst: any, options: any) => {
-      const transactionId: string = options.transactionId ?? `txn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const transactionId: string =
+        options.transactionId ?? `txn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
       // Track which docs are created in this batch (for create-then-edit in same batch)
       const createdInBatch = new Set<string>()
@@ -170,7 +169,7 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
 
         if (action.type === 'document.edit') {
           // Real SDK: editDocument fails if doc doesn't exist
-          const docExists = createdInBatch.has(docId) || (entry.doc._id !== undefined)
+          const docExists = createdInBatch.has(docId) || entry.doc._id !== undefined
           if (!docExists) {
             throw new Error('Cannot edit document because it does not exist in draft or published form.')
           }
@@ -219,7 +218,16 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
           subscriber(entry.doc)
         }
       }
-      return { transactionId, documents: {}, previous: {}, previousRevs: {}, appeared: [], updated: [], disappeared: [], submitted: async () => {} }
+      return {
+        transactionId,
+        documents: {},
+        previous: {},
+        previousRevs: {},
+        appeared: [],
+        updated: [],
+        disappeared: [],
+        submitted: async () => {},
+      }
     },
   }
 }

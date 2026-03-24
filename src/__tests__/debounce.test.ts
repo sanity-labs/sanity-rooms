@@ -1,7 +1,9 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { createFlusher, clearFlusher, scheduleFlusher } from '../debounce'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { clearFlusher, createFlusher, scheduleFlusher } from '../debounce'
 
-afterEach(() => { vi.useRealTimers() })
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 describe('DebouncedFlusher', () => {
   it('calls flush after debounce delay', () => {

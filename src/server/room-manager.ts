@@ -6,8 +6,8 @@
  */
 
 import type { SanityInstance } from '@sanity/sdk'
-import type { SanityResource } from './sanity-bridge'
 import { Room, type RoomConfig } from './room'
+import type { SanityResource } from './sanity-bridge'
 
 export interface RoomFactory {
   /** Create a RoomConfig for the given roomId. Return null to reject. */
@@ -70,7 +70,9 @@ export class RoomManager {
       room.dispose()
       return null
     }
-    room.onDispose(() => { this.rooms.delete(roomId) })
+    room.onDispose(() => {
+      this.rooms.delete(roomId)
+    })
     this.rooms.set(roomId, room)
 
     return room

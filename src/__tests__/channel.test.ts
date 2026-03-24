@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { docChannel, queryChannel, parseChannel } from '../channel'
+import { describe, expect, it } from 'vitest'
+import { docChannel, parseChannel, queryChannel } from '../channel'
 
 describe('channel helpers', () => {
   it('docChannel produces doc: prefix', () => {

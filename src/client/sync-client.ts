@@ -15,13 +15,13 @@
  */
 
 import { diffValue } from '@sanity/diff-patch'
-import type { Transport } from '../transport'
 import { applySanityPatches } from '../apply-patches'
+import { docChannel, parseChannel } from '../channel'
+import { clearFlusher, createFlusher, type DebouncedFlusher, scheduleFlusher } from '../debounce'
 import type { Mutation } from '../mutation'
 import type { ClientMsg, ServerMsg } from '../protocol'
 import { isServerMsg } from '../protocol'
-import { docChannel, parseChannel } from '../channel'
-import { type DebouncedFlusher, createFlusher, clearFlusher, scheduleFlusher } from '../debounce'
+import type { Transport } from '../transport'
 import { MutationQueue } from './mutation-queue'
 
 const UNHYDRATED = Symbol('unhydrated')
@@ -62,7 +62,6 @@ function generateMutationId(): string {
   return `m_${++nextMutationId}_${Date.now()}`
 }
 
-
 export class SyncClient {
   private docs = new Map<string, DocState>()
   private transport: Transport
@@ -100,10 +99,12 @@ export class SyncClient {
       })
     }
 
-    if ([...this.docs.values()].every(d => d.hydrated)) {
+    if ([...this.docs.values()].every((d) => d.hydrated)) {
       this.ready = Promise.resolve()
     } else {
-      this.ready = new Promise(resolve => { this._resolveReady = resolve })
+      this.ready = new Promise((resolve) => {
+        this._resolveReady = resolve
+      })
     }
 
     this.unsubMessage = this.transport.onMessage((raw) => {
@@ -128,13 +129,15 @@ export class SyncClient {
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
     doc.listeners.add(listener)
-    return () => { doc.listeners.delete(listener) }
+    return () => {
+      doc.listeners.delete(listener)
+    }
   }
 
   // ── Hydration ─────────────────────────────────────────────────────────
 
   get isHydrated(): boolean {
-    return [...this.docs.values()].every(d => d.hydrated)
+    return [...this.docs.values()].every((d) => d.hydrated)
   }
 
   isDocHydrated(docId: string): boolean {
@@ -190,7 +193,9 @@ export class SyncClient {
       this.appHandlers.set(channel, handlers)
     }
     handlers.add(handler)
-    return () => { handlers!.delete(handler) }
+    return () => {
+      handlers!.delete(handler)
+    }
   }
 
   // ── Status ──────────────────────────────────────────────────────────────
@@ -201,7 +206,9 @@ export class SyncClient {
 
   onStatus(handler: StatusListener): () => void {
     this.statusListeners.add(handler)
-    return () => { this.statusListeners.delete(handler) }
+    return () => {
+      this.statusListeners.delete(handler)
+    }
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -249,7 +256,7 @@ export class SyncClient {
           doc.lastSentState = received
           doc.hydrated = true
           for (const listener of doc.listeners) listener()
-          if ([...this.docs.values()].every(d => d.hydrated)) {
+          if ([...this.docs.values()].every((d) => d.hydrated)) {
             this._resolveReady?.()
             this._resolveReady = null
           }

@@ -1,21 +1,25 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('@sanity/sdk', async () => {
   const { createSdkMocks } = await import('../testing/mock-sanity')
   return createSdkMocks()
 })
 
-import { createMockSanity } from '../testing/mock-sanity'
+import type { DocumentMapping } from '../mapping'
+import type { RoomConfig } from '../server/room'
+import type { RoomFactory } from '../server/room-manager'
 import { RoomManager } from '../server/room-manager'
 import { createMemoryTransportPair } from '../testing/memory-transport'
-import type { RoomFactory } from '../server/room-manager'
-import type { RoomConfig } from '../server/room'
-import type { DocumentMapping } from '../mapping'
+import { createMockSanity } from '../testing/mock-sanity'
 
 const testMapping: DocumentMapping<{ value: number }> = {
   documentType: 'test',
-  fromSanity(doc) { return { value: Number(doc.value ?? 0) } },
-  toSanityPatch(state) { return { patch: { value: state.value } } },
+  fromSanity(doc) {
+    return { value: Number(doc.value ?? 0) }
+  },
+  toSanityPatch(state) {
+    return { patch: { value: state.value } }
+  },
   applyMutation(_state, mutation) {
     if (mutation.kind === 'replace') return mutation.state as { value: number }
     return null
@@ -98,7 +102,9 @@ describe('RoomManager', () => {
     const room1 = await manager.getOrCreate('r1')
     expect(room1).not.toBeNull()
     let externalCleanupCalled = false
-    room1!.onDispose(() => { externalCleanupCalled = true })
+    room1!.onDispose(() => {
+      externalCleanupCalled = true
+    })
 
     // Add and remove client to trigger grace timer
     const { server: s1 } = createMemoryTransportPair()
@@ -119,12 +125,14 @@ describe('RoomManager', () => {
     // The new room should be functional — client gets state
     const { server: s2, client: c2 } = createMemoryTransportPair()
     const received: any[] = []
-    c2.onMessage((msg) => { received.push(msg) })
+    c2.onMessage((msg) => {
+      received.push(msg)
+    })
     room2!.addClient(s2)
 
     // Wait for ready + state delivery
-    await new Promise(resolve => setTimeout(resolve, 50))
-    const stateMsg = received.find(m => m.type === 'state')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const stateMsg = received.find((m) => m.type === 'state')
     expect(stateMsg).toBeDefined()
     expect(stateMsg.state).toEqual({ value: 42 })
 

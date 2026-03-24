@@ -5,7 +5,7 @@
  * No network involved — both sides share memory.
  */
 
-import type { Transport, ServerTransport } from '../transport'
+import type { ServerTransport, Transport } from '../transport'
 
 let nextClientId = 0
 
@@ -33,11 +33,15 @@ export function createMemoryTransportPair(): MemoryTransportPair {
     },
     onMessage(handler) {
       clientMessageHandlers.add(handler)
-      return () => { clientMessageHandlers.delete(handler) }
+      return () => {
+        clientMessageHandlers.delete(handler)
+      }
     },
     onClose(handler) {
       clientCloseHandlers.add(handler)
-      return () => { clientCloseHandlers.delete(handler) }
+      return () => {
+        clientCloseHandlers.delete(handler)
+      }
     },
     close() {
       if (closed) return
@@ -58,11 +62,15 @@ export function createMemoryTransportPair(): MemoryTransportPair {
     },
     onMessage(handler) {
       serverMessageHandlers.add(handler)
-      return () => { serverMessageHandlers.delete(handler) }
+      return () => {
+        serverMessageHandlers.delete(handler)
+      }
     },
     onClose(handler) {
       serverCloseHandlers.add(handler)
-      return () => { serverCloseHandlers.delete(handler) }
+      return () => {
+        serverCloseHandlers.delete(handler)
+      }
     },
     close() {
       if (closed) return

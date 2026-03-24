@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { MutationQueue } from '../client/mutation-queue'
 import type { Mutation } from '../mutation'
 

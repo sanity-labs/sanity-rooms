@@ -16,7 +16,7 @@ export async function retry<T>(
       return await operation()
     } catch (err) {
       if (attempt < maxAttempts && shouldRetry(err)) {
-        await new Promise(resolve => setTimeout(resolve, baseDelayMs * Math.pow(2, attempt)))
+        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * 2 ** attempt))
         await onRetry(attempt)
         continue
       }

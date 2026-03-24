@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { applySanityPatches } from '../apply-patches'
 import type { SanityPatchOperations } from '@sanity/diff-patch'
+import { describe, expect, it } from 'vitest'
+import { applySanityPatches } from '../apply-patches'
 
 describe('applySanityPatches', () => {
   it('applies set operations to top-level keys', () => {

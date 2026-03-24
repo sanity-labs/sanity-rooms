@@ -1,4 +1,4 @@
-import { defineConfig } from '@sanity/pkg-utils';
+import { defineConfig } from '@sanity/pkg-utils'
 
 export default defineConfig({
   tsconfig: 'tsconfig.build.json',
@@ -8,4 +8,4 @@ export default defineConfig({
       'ae-missing-release-tag': 'off',
     },
   },
-});
+})
