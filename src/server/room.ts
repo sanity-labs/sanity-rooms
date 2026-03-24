@@ -17,7 +17,13 @@ import { applySanityPatches } from '../apply-patches'
 import { docChannel, parseChannel } from '../channel'
 import type { DocumentMapping } from '../mapping'
 import { immutableReconcile } from '../reconcile'
-import type { SanityInstance } from '@sanity/sdk'
+import {
+  publishDocument,
+  createDocumentHandle,
+  applyDocumentActions,
+  type SanityInstance,
+  type DocumentAction,
+} from '@sanity/sdk'
 import { SanityBridge, type SanityResource } from './sanity-bridge'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -76,6 +82,7 @@ export class Room {
   readonly ready: Promise<void[]>
 
   private onDisposeListeners: Array<() => void> = []
+  private onMutationListeners: Array<(docKey: string) => void> = []
 
   constructor(config: RoomConfig, instance: SanityInstance, resource: SanityResource) {
     this.instance = instance
@@ -150,6 +157,11 @@ export class Room {
     this.onDisposeListeners.push(cb)
   }
 
+  /** Register a callback that fires after any document mutation (from clients or mutateDoc). */
+  onMutation(cb: (docKey: string) => void): void {
+    this.onMutationListeners.push(cb)
+  }
+
   hold(): void { this.holdCount++ }
 
   /**
@@ -202,6 +214,58 @@ export class Room {
 
     // Broadcast domain state to all clients
     this.broadcastAll({ channel: docChannel(docKey), type: 'state', state: result })
+
+    // Notify mutation listeners
+    for (const cb of this.onMutationListeners) cb(docKey)
+  }
+
+  // ── Publish ─────────────────────────────────────────────────────────
+
+  /**
+   * Publish a document and all its referenced documents to make them
+   * publicly available (published perspective).
+   *
+   * Ref docs are published first so that the main doc's weak references
+   * can be strengthened on publish (Sanity requires published targets).
+   */
+  async publish(docKey: string): Promise<{ success: boolean; error?: string }> {
+    const doc = this.docs.get(docKey)
+    if (!doc) return { success: false, error: `Unknown document key: ${docKey}` }
+
+    const actions: DocumentAction[] = []
+
+    // 1. Publish ref docs first
+    const refMap = this.refBridges.get(docKey)
+    if (refMap) {
+      for (const refBridge of refMap.values()) {
+        actions.push(publishDocument(
+          createDocumentHandle({
+            documentId: refBridge.docId,
+            documentType: refBridge.documentType,
+            ...this.resource,
+          }),
+        ))
+      }
+    }
+
+    // 2. Publish main doc
+    actions.push(publishDocument(
+      createDocumentHandle({
+        documentId: doc.bridge.docId,
+        documentType: doc.bridge.documentType,
+        ...this.resource,
+      }),
+    ))
+
+    try {
+      const result = await applyDocumentActions(this.instance, { actions })
+      await result.submitted()
+      return { success: true }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[room] publish failed for ${docKey}:`, message)
+      return { success: false, error: message }
+    }
   }
 
   // ── App channels ──────────────────────────────────────────────────────
@@ -458,6 +522,9 @@ export class Room {
       // Broadcast to OTHER clients, ack to sender
       this.broadcastExcept(clientId, { channel: msg.channel, type: 'state', state: result })
       this.sendTo(clientId, { channel: msg.channel, type: 'ack', mutationId: msg.mutationId })
+
+      // Notify mutation listeners
+      for (const cb of this.onMutationListeners) cb(parsed.id)
     }
   }
 

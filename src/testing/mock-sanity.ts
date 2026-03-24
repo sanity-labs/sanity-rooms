@@ -7,6 +7,17 @@
 
 import type { SanityInstance } from '@sanity/sdk'
 
+/** Recursively strip _weak and _strengthenOnPublish from references. */
+function stripWeakRefs(obj: Record<string, unknown>): void {
+  for (const key of Object.keys(obj)) {
+    if (key === '_weak' || key === '_strengthenOnPublish') {
+      delete obj[key]
+    } else if (obj[key] && typeof obj[key] === 'object') {
+      stripWeakRefs(obj[key] as Record<string, unknown>)
+    }
+  }
+}
+
 interface DocEntry {
   doc: Record<string, unknown>
   subscribers: Set<(doc: Record<string, unknown> | null) => void>
@@ -141,6 +152,12 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
       initialValue: content,
     }),
 
+    publishDocument: (handle: any) => ({
+      type: 'document.publish',
+      documentId: handle.documentId,
+      documentType: handle.documentType,
+    }),
+
     applyDocumentActions: async (inst: any, options: any) => {
       const transactionId: string = options.transactionId ?? `txn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -178,6 +195,20 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
             _id: docId,
           })
           createdInBatch.add(docId)
+        } else if (action.type === 'document.publish') {
+          // Publish: copy draft to a published entry (strip drafts. prefix)
+          const publishedId = docId.replace(/^drafts\./, '')
+          const publishedEntry = inst._getOrCreateEntry(`published:${publishedId}`)
+          // Deep-copy draft content, stripping weak ref markers
+          const published = JSON.parse(JSON.stringify(entry.doc))
+          published._id = publishedId
+          delete published._rev
+          stripWeakRefs(published)
+          publishedEntry.doc = published
+          // Notify published subscribers
+          for (const subscriber of publishedEntry.subscribers) {
+            subscriber(publishedEntry.doc)
+          }
         }
 
         // Set _rev like the real SDK does

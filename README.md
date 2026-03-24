@@ -1,7 +1,6 @@
 # sanity-rooms
 
-> **⚠️ Proof of Concept — Work in Progress**
-> This is an early-stage experiment, 100% vibecoded. APIs will change. Not production-ready.
+> **Early stage** — APIs may change. Core features (sync, refs, publish) are stable and tested.
 
 Transport-agnostic, optimistic document synchronization for Sanity. Provides multi-client rooms with real-time broadcast, a document mapping layer, and app-defined channels — on top of `@sanity/sdk`'s document store and shared listener.
 
@@ -16,6 +15,8 @@ A coordination layer between `@sanity/sdk` (Sanity connection) and your app (mul
 - **Document mapping** — your in-memory state shape != Sanity doc shape? Provide `fromSanity`/`toSanityPatch` and the Room handles translation
 - **Ref following** — `resolveRefs` discovers referenced docs, Room auto-subscribes via SDK's shared listener (zero extra connections), `fromSanityWithRefs` assembles the full state
 - **Transport abstraction** — WebSocket, POST+SSE, long-polling, in-process. Implement 4 methods, done.
+- **Publishing** — `Room.publish(docKey)` publishes a document and all its refs in one batch (refs first, then main doc). Weak references auto-strengthen on publish.
+- **Mutation hooks** — `Room.onMutation(cb)` fires after any mutation (client or server-side), useful for dirty-tracking
 - **App channels** — first-class named channels for concerns the package doesn't own (chat, presence, streaming)
 - **Own-write echo suppression** — tracks transaction IDs, skips SDK echoes from our own writes
 
@@ -221,6 +222,72 @@ Custom resources (fonts, palettes, backgrounds) are stored as separate Sanity do
 5. **Atomic writes** — ref doc edits + main doc edit go in one `applyDocumentActions` batch
 6. **Ref doc upsert** — uses `editDocument` (not `createDocument`) for ref docs so existing drafts don't cause batch failures
 7. **Weak references** — refs use `_weak: true` + `_strengthenOnPublish` so drafts can reference other drafts
+
+## Publishing
+
+All edits go to Sanity **drafts** (that's how the SDK works). To make content publicly visible, you need to **publish** — which copies the draft to the published version and strengthens any weak references.
+
+```typescript
+// Publish a document + all its ref docs in one batch
+const result = await room.publish('config')
+// result: { success: true } or { success: false, error: 'reason' }
+```
+
+### How it works
+
+1. Collects all ref bridges for the doc key (custom fonts, palettes, backgrounds, etc.)
+2. Builds a batch: `publishDocument(refHandle)` for each ref, then `publishDocument(mainHandle)`
+3. Calls `applyDocumentActions` with the batch, awaits `.submitted()` for server confirmation
+4. Returns `{ success, error? }`
+
+**Ref-before-main ordering** is critical — when the main doc is published, Sanity strengthens its `_strengthenOnPublish` weak refs into strong refs. The referenced docs must already be published or you get a 409 Conflict.
+
+### Draft/published distinction
+
+| Operation | Targets |
+|-----------|---------|
+| `SyncClient.mutate()` → Room → SDK `editDocument` | Drafts only |
+| `room.publish(docKey)` → SDK `publishDocument` | Draft → Published |
+| GROQ with `perspective: 'drafts'` | Prefers draft, falls back to published |
+| GROQ with `perspective: 'published'` | Published only (returns nothing if unpublished) |
+
+### Dirty tracking with onMutation
+
+`Room.onMutation(cb)` fires after every mutation from any source (client WS messages, `room.mutateDoc()`, AI tool calls). Use it to track whether the draft has diverged from published:
+
+```typescript
+room.onMutation((docKey) => {
+  if (docKey === 'config') {
+    hasUnpublishedChanges = true
+    broadcastDirtyState()
+  }
+})
+```
+
+### Publish via app channel (recommended pattern)
+
+Publishing is an app-level concern — use an app channel rather than extending the sync protocol:
+
+```typescript
+// Server: register publish channel
+room.registerAppChannel('publish', {
+  onMessage: (_clientId, payload, _room) => {
+    if (payload.type === 'publish-request') {
+      room.broadcastApp('publish', { type: 'publish-started' })
+      const result = await room.publish('config')
+      room.broadcastApp('publish', result.success
+        ? { type: 'publish-success' }
+        : { type: 'publish-failed', error: result.error })
+    }
+  },
+})
+
+// Client: request publish
+syncClient.sendApp('publish', { type: 'publish-request' })
+syncClient.onApp('publish', (msg) => {
+  // handle publish-started, publish-success, publish-failed
+})
+```
 
 ## What's NOT here yet
 
