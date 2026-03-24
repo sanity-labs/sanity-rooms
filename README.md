@@ -289,6 +289,20 @@ syncClient.onApp('publish', (msg) => {
 })
 ```
 
+## Development in a monorepo
+
+When this package lives as a git subtree inside a pnpm workspace, the root lock file takes over — the subtree's own `pnpm-lock.yaml` won't auto-update. Since the upstream CI uses `--frozen-lockfile`, you need to keep it in sync:
+
+```bash
+# From the monorepo root:
+pnpm sync:subtree-lock
+
+# Or manually:
+cd packages/sanity-rooms && pnpm install --ignore-workspace --lockfile-only
+```
+
+The monorepo's pre-commit hook auto-runs this when `package.json` changes are staged.
+
 ## What's NOT here yet
 
 - **GROQ query subscriptions** — planned with local evaluation via `groq-js`

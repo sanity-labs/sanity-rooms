@@ -16,6 +16,16 @@ git remote add sanity-rooms git@github.com:sanity-labs/sanity-rooms.git  # once
 git subtree push --prefix=packages/sanity-rooms sanity-rooms main
 ```
 
+### Lock file sync
+
+The upstream CI uses `--frozen-lockfile`, so the subtree's own `pnpm-lock.yaml` must stay current. From within the monorepo:
+
+```bash
+pnpm sync:subtree-lock   # regenerate packages/sanity-rooms/pnpm-lock.yaml
+```
+
+This runs automatically via pre-commit hook when `packages/sanity-rooms/package.json` is staged. To run manually: `cd packages/sanity-rooms && pnpm install --ignore-workspace --lockfile-only`.
+
 ## Commands
 
 ```bash
