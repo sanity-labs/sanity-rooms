@@ -35,6 +35,7 @@ export interface SanityBridgeOptions {
   docId: string
   documentType: string
   onChange: (doc: Record<string, unknown>) => void
+  logger?: import('../logger').Logger
 }
 
 export class SanityBridge {
@@ -44,6 +45,7 @@ export class SanityBridge {
   private readonly instance: SanityInstance
   private readonly resource: SanityResource
   private readonly onChange: (doc: Record<string, unknown>) => void
+  private readonly logger: import('../logger').Logger
   private unsubscribe: (() => void) | null = null
   private ready = false
   private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: RefDocWrite[]; transactionId?: string }> = []
@@ -56,6 +58,7 @@ export class SanityBridge {
     this.docId = options.docId.replace(/^drafts\./, '')
     this.documentType = options.documentType
     this.onChange = options.onChange
+    this.logger = options.logger ?? console
 
     const handle = createDocumentHandle({
       documentId: this.docId,
@@ -129,7 +132,7 @@ export class SanityBridge {
       actions,
       ...(transactionId && { transactionId }),
     }).catch((err) => {
-      console.error(`[bridge:${this.docId}] write error:`, err.message ?? err)
+      this.logger.error(`[bridge:${this.docId}] write error:`, err.message ?? err)
     })
   }
 
@@ -151,7 +154,7 @@ export class SanityBridge {
       actions,
       ...(transactionId && { transactionId }),
     }).catch((err) => {
-      console.error(`[bridge:${this.docId}] writePatch error:`, err.message ?? err)
+      this.logger.error(`[bridge:${this.docId}] writePatch error:`, err.message ?? err)
     })
   }
 

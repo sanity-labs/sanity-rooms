@@ -4,6 +4,8 @@ export type { ParsedChannel } from './channel'
 export { docChannel, parseChannel, queryChannel } from './channel'
 export type { DebouncedFlusher } from './debounce'
 export { clearFlusher, createFlusher, scheduleFlusher } from './debounce'
+export type { Logger } from './logger'
+export { consoleLogger } from './logger'
 export type { DocumentMapping, RefDescriptor, SanityPatchResult } from './mapping'
 export type { Mutation, SanityPatchOperations } from './mutation'
 export type {

@@ -60,6 +60,10 @@ export class MutationQueue {
     return this.queue.length > 0
   }
 
+  get pendingCount(): number {
+    return this.queue.length
+  }
+
   getPending(): readonly PendingMutation[] {
     return this.queue
   }

@@ -18,6 +18,7 @@ import {
 } from '@sanity/sdk'
 import { applySanityPatches } from '../apply-patches'
 import { docChannel, parseChannel } from '../channel'
+import { consoleLogger, type Logger } from '../logger'
 import type { DocumentMapping } from '../mapping'
 import type { Mutation } from '../mutation'
 import type { ClientMsg, ServerMsg } from '../protocol'
@@ -36,6 +37,8 @@ export interface RoomDocConfig {
 export interface RoomConfig {
   documents: Record<string, RoomDocConfig>
   gracePeriodMs?: number
+  /** Custom logger. Defaults to console. */
+  logger?: Logger
 }
 
 export interface AppChannelHandler {
@@ -55,8 +58,9 @@ interface DocEntry {
   mapping: DocumentMapping<unknown>
   /** Domain state — the Room's authoritative app-level state. */
   state: unknown
-  /** Transaction IDs of our own writes — skip echoes with matching _rev. */
-  ownTxns: Set<string>
+  /** Transaction IDs of our own writes — skip echoes with matching _rev.
+   *  Map<txnId, timestamp> — entries older than 60s are pruned on each write. */
+  ownTxns: Map<string, number>
   /** Called after state changes — resolves the ready promise when fully hydrated. */
   onHydrated?: () => void
 }
@@ -73,6 +77,7 @@ export class Room {
   private holdCount = 0
   private instance: SanityInstance
   private resource: SanityResource
+  private logger: Logger
 
   // Ref-following: ref bridges per parent doc key
   private refBridges = new Map<string, Map<string, SanityBridge>>()
@@ -89,6 +94,7 @@ export class Room {
     this.instance = instance
     this.resource = resource
     this.gracePeriodMs = config.gracePeriodMs ?? 30_000
+    this.logger = config.logger ?? consoleLogger
 
     const readyPromises: Promise<void>[] = []
     for (const [key, docConfig] of Object.entries(config.documents)) {
@@ -99,6 +105,7 @@ export class Room {
 
   // ── Client management ─────────────────────────────────────────────────
 
+  /** Add a client connection. Sends current state once hydrated. Returns the client ID. */
   addClient(transport: ServerTransport): string {
     if (this.graceTimer) {
       clearTimeout(this.graceTimer)
@@ -131,6 +138,7 @@ export class Room {
     return clientId
   }
 
+  /** Remove a client connection. Starts the grace-period timer if no clients remain. */
   removeClient(clientId: string): void {
     const client = this.clients.get(clientId)
     if (!client) return
@@ -195,12 +203,14 @@ export class Room {
     return doc.bridge.docId
   }
 
+  /** Get the current domain state for a document key. Throws if unknown. */
   getDocState<T = unknown>(docKey: string): T {
     const doc = this.docs.get(docKey)
     if (doc) return doc.state as T
     throw new Error(`Unknown document key: ${docKey}`)
   }
 
+  /** Apply a mutation to a document. Writes to Sanity and broadcasts to all clients. */
   mutateDoc(docKey: string, mutation: Mutation): void {
     const doc = this.docs.get(docKey)
     if (!doc) throw new Error(`Unknown document key: ${docKey}`)
@@ -214,7 +224,7 @@ export class Room {
     const { patch, refPatches } = doc.mapping.toSanityPatch(result)
     const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
     const txnId = crypto.randomUUID()
-    doc.ownTxns.add(txnId)
+    this.recordOwnTxn(doc, txnId)
     doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)
 
     // Broadcast domain state to all clients
@@ -272,23 +282,26 @@ export class Room {
       return { success: true }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      console.error(`[room] publish failed for ${docKey}:`, message)
+      this.logger.error(`[room] publish failed for ${docKey}:`, message)
       return { success: false, error: message }
     }
   }
 
   // ── App channels ──────────────────────────────────────────────────────
 
+  /** Register a named app channel (e.g. 'chat', 'publish', 'presence'). */
   registerAppChannel(name: string, handler: AppChannelHandler): void {
     this.appChannels.set(name, handler)
   }
 
+  /** Broadcast a payload to all clients on an app channel. Optionally exclude one client. */
   broadcastApp(channel: string, payload: unknown, exclude?: string): void {
     const msg: ServerMsg = { channel, type: 'app', payload }
     if (exclude) this.broadcastExcept(exclude, msg)
     else this.broadcastAll(msg)
   }
 
+  /** Send a payload to one specific client on an app channel. */
   sendApp(clientId: string, channel: string, payload: unknown): void {
     this.sendTo(clientId, { channel, type: 'app', payload })
   }
@@ -302,7 +315,10 @@ export class Room {
       clearTimeout(this.graceTimer)
       this.graceTimer = null
     }
-    for (const doc of this.docs.values()) doc.bridge.dispose()
+    for (const doc of this.docs.values()) {
+      doc.bridge.dispose()
+      doc.ownTxns.clear()
+    }
     this.docs.clear()
     for (const [, refMap] of this.refBridges) {
       for (const bridge of refMap.values()) bridge.dispose()
@@ -317,6 +333,19 @@ export class Room {
     this.appChannels.clear()
     for (const cb of this.onDisposeListeners) cb()
     this.onDisposeListeners.length = 0
+  }
+
+  /** Record a write transaction ID and prune entries older than 60s. */
+  private recordOwnTxn(doc: DocEntry, txnId: string): void {
+    const now = Date.now()
+    doc.ownTxns.set(txnId, now)
+    // Prune stale entries (60s is well beyond SDK write throttle + network round trip)
+    if (doc.ownTxns.size > 50) {
+      const cutoff = now - 60_000
+      for (const [id, ts] of doc.ownTxns) {
+        if (ts < cutoff) doc.ownTxns.delete(id)
+      }
+    }
   }
 
   // ── Internal: doc setup ───────────────────────────────────────────────
@@ -344,6 +373,7 @@ export class Room {
         resource: this.resource,
         docId: docConfig.docId,
         documentType: docConfig.mapping.documentType,
+        logger: this.logger,
         onChange: (rawDoc) => {
           this.handleSanityChange(key, rawDoc)
           tryResolve()
@@ -355,7 +385,7 @@ export class Room {
         onHydrated: tryResolve,
         mapping: docConfig.mapping,
         state: null,
-        ownTxns: new Set(),
+        ownTxns: new Map(),
       })
     })
   }
@@ -373,7 +403,7 @@ export class Room {
 
     // Skip our own write echoes — we know all our transaction IDs
     const rev = rawDoc._rev as string | undefined
-    if (rev && doc.ownTxns.has(rev)) {
+    if (rev && doc.ownTxns.has(rev) /* don't delete — SDK may emit same _rev multiple times */) {
       return
     }
 
@@ -434,6 +464,7 @@ export class Room {
           resource: this.resource,
           docId: desc.docId,
           documentType: desc.mapping.documentType,
+          logger: this.logger,
           onChange: (_refDoc) => {
             // Ref doc loaded — tell the parent bridge it exists (so writes use edit, not create)
             parentDoc?.bridge.markRefDocKnown(desc.docId)
@@ -497,7 +528,13 @@ export class Room {
     if (parsed.type === 'app' || msg.type === 'app') {
       const channelName = parsed.type === 'app' ? parsed.id : msg.channel
       const handler = this.appChannels.get(channelName)
-      if (handler && msg.type === 'app') handler.onMessage(clientId, msg.payload, this)
+      if (handler && msg.type === 'app') {
+        try {
+          handler.onMessage(clientId, msg.payload, this)
+        } catch (err: unknown) {
+          this.logger.error(`[room] app channel "${channelName}" handler error:`, err)
+        }
+      }
       return
     }
 
@@ -537,7 +574,7 @@ export class Room {
       // Write to Sanity — always use toSanityPatch so ref docs
       // (custom fonts/palettes/backgrounds) are written alongside the main doc
       const txnId = crypto.randomUUID()
-      doc.ownTxns.add(txnId)
+      this.recordOwnTxn(doc, txnId)
       const { patch, refPatches } = doc.mapping.toSanityPatch(result)
       const refDocs = this.buildRefDocWrites(patch as Record<string, unknown>, doc.mapping, refPatches)
       doc.bridge.write(patch as Record<string, unknown>, refDocs, txnId)

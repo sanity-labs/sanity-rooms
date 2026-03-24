@@ -82,16 +82,15 @@ export type ServerMsg =
 
 // ── Type guards ──────────────────────────────────────────────────────────────
 
+/** Type guard for client-to-server messages (must have `type` and `channel` string fields). */
 export function isClientMsg(msg: unknown): msg is ClientMsg {
-  return (
-    typeof msg === 'object' &&
-    msg !== null &&
-    'type' in msg &&
-    'channel' in msg &&
-    typeof (msg as any).channel === 'string'
-  )
+  if (typeof msg !== 'object' || msg === null) return false
+  const obj = msg as Record<string, unknown>
+  return typeof obj.type === 'string' && typeof obj.channel === 'string'
 }
 
+/** Type guard for server-to-client messages (must have a `type` string field). */
 export function isServerMsg(msg: unknown): msg is ServerMsg {
-  return typeof msg === 'object' && msg !== null && 'type' in msg
+  if (typeof msg !== 'object' || msg === null) return false
+  return typeof (msg as Record<string, unknown>).type === 'string'
 }

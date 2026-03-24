@@ -6,6 +6,7 @@
  */
 
 import type { SanityInstance } from '@sanity/sdk'
+import { consoleLogger, type Logger } from '../logger'
 import { Room, type RoomConfig } from './room'
 import type { SanityResource } from './sanity-bridge'
 
@@ -14,19 +15,55 @@ export interface RoomFactory {
   create(roomId: string, context: unknown): Promise<RoomConfig | null>
 }
 
+export interface RoomManagerOptions {
+  instance: SanityInstance
+  resource: SanityResource
+  factory: RoomFactory
+  /** Timeout (ms) waiting for room.ready on creation. Default: 15000. */
+  readyTimeoutMs?: number
+  /** Custom logger. Defaults to console. */
+  logger?: Logger
+}
+
 export class RoomManager {
   private rooms = new Map<string, Room>()
   private pending = new Map<string, Promise<Room | null>>()
   private instance: SanityInstance
   private resource: SanityResource
   private factory: RoomFactory
+  private readyTimeoutMs: number
+  private logger: Logger
 
-  constructor(instance: SanityInstance, resource: SanityResource, factory: RoomFactory) {
-    this.instance = instance
-    this.resource = resource
-    this.factory = factory
+  constructor(options: RoomManagerOptions)
+  /** @deprecated Use options object instead. */
+  constructor(instance: SanityInstance, resource: SanityResource, factory: RoomFactory)
+  constructor(
+    instanceOrOptions: SanityInstance | RoomManagerOptions,
+    resource?: SanityResource,
+    factory?: RoomFactory,
+  ) {
+    if (resource !== undefined && factory !== undefined) {
+      // Legacy 3-arg constructor
+      this.instance = instanceOrOptions as SanityInstance
+      this.resource = resource
+      this.factory = factory
+      this.readyTimeoutMs = 15_000
+      this.logger = consoleLogger
+    } else {
+      const opts = instanceOrOptions as RoomManagerOptions
+      this.instance = opts.instance
+      this.resource = opts.resource
+      this.factory = opts.factory
+      this.readyTimeoutMs = opts.readyTimeoutMs ?? 15_000
+      this.logger = opts.logger ?? consoleLogger
+    }
   }
 
+  /**
+   * Get an existing room or create one via the factory. Deduplicates concurrent
+   * create calls for the same roomId. Returns null if the factory rejects.
+   * Pass `context` (e.g. authenticated user) to the factory for auth checks.
+   */
   async getOrCreate(roomId: string, context?: unknown): Promise<Room | null> {
     const existing = this.rooms.get(roomId)
     if (existing) return existing
@@ -44,10 +81,12 @@ export class RoomManager {
     }
   }
 
+  /** Peek at an existing room without creating one. */
   get(roomId: string): Room | undefined {
     return this.rooms.get(roomId)
   }
 
+  /** Dispose all rooms and clear the manager. */
   async dispose(): Promise<void> {
     const rooms = [...this.rooms.values()]
     this.rooms.clear()
@@ -63,10 +102,12 @@ export class RoomManager {
     try {
       await Promise.race([
         room.ready,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`Room ready timeout for ${roomId}`)), 15000)),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Room ready timeout for ${roomId}`)), this.readyTimeoutMs),
+        ),
       ])
     } catch (err: any) {
-      console.error(`[room-manager] ${err.message}`)
+      this.logger.error(`[room-manager] ${err.message}`)
       room.dispose()
       return null
     }

@@ -118,13 +118,16 @@ export class SyncClient {
 
   // ── Document state ──────────────────────────────────────────────────────
 
+  /** Get the current optimistic state for a document. Throws if disposed, unknown, or not hydrated. */
   getDocState<T = unknown>(docId: string): T {
+    if (this.disposed) throw new Error('SyncClient is disposed')
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
     if (!doc.hydrated) throw new Error(`Document "${docId}" not hydrated — await client.ready`)
     return doc.localState as T
   }
 
+  /** Subscribe to state changes for a document. Returns an unsubscribe function. */
   subscribeDoc(docId: string, listener: () => void): () => void {
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
@@ -148,7 +151,13 @@ export class SyncClient {
 
   // ── Mutations ───────────────────────────────────────────────────────────
 
+  /**
+   * Apply a mutation. For `replace`: updates local state optimistically,
+   * diffs at flush time, sends only changed fields. For `named`: queues
+   * and sends immediately. Throws if disposed or not hydrated.
+   */
   mutate(docId: string, mutation: Mutation): void {
+    if (this.disposed) throw new Error('SyncClient is disposed')
     const doc = this.docs.get(docId)
     if (!doc) throw new Error(`Unknown document: ${docId}`)
     if (!doc.hydrated) throw new Error(`Cannot mutate "${docId}" before hydration — await client.ready`)
@@ -182,10 +191,13 @@ export class SyncClient {
 
   // ── App channels ────────────────────────────────────────────────────────
 
+  /** Send a message on an app channel. Throws if disposed. */
   sendApp(channel: string, payload: unknown): void {
+    if (this.disposed) throw new Error('SyncClient is disposed')
     this.transport.send({ channel, type: 'app', payload } satisfies ClientMsg)
   }
 
+  /** Listen for messages on an app channel. Returns an unsubscribe function. */
   onApp(channel: string, handler: AppHandler): () => void {
     let handlers = this.appHandlers.get(channel)
     if (!handlers) {
@@ -198,12 +210,33 @@ export class SyncClient {
     }
   }
 
+  // ── Pending writes ────────────────────────────────────────────────────
+
+  /** True if any document has unsent local changes or queued named mutations. */
+  hasPendingWrites(): boolean {
+    for (const doc of this.docs.values()) {
+      if (doc.dirty || doc.queue.hasPending()) return true
+    }
+    return this.pendingSends.length > 0
+  }
+
+  /** Number of pending sends (dirty doc flushes + queued named mutations). */
+  getPendingCount(): number {
+    let count = this.pendingSends.length
+    for (const doc of this.docs.values()) {
+      if (doc.dirty) count++
+      count += doc.queue.pendingCount
+    }
+    return count
+  }
+
   // ── Status ──────────────────────────────────────────────────────────────
 
   get status(): 'connected' | 'disconnected' {
     return this._status
   }
 
+  /** Listen for connection status changes. Returns an unsubscribe function. */
   onStatus(handler: StatusListener): () => void {
     this.statusListeners.add(handler)
     return () => {
@@ -213,6 +246,7 @@ export class SyncClient {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
+  /** Close the transport and clean up. Subsequent calls to mutate/sendApp/getDocState will throw. */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -256,9 +290,10 @@ export class SyncClient {
           doc.lastSentState = received
           doc.hydrated = true
           for (const listener of doc.listeners) listener()
-          if ([...this.docs.values()].every((d) => d.hydrated)) {
-            this._resolveReady?.()
+          if (this._resolveReady && [...this.docs.values()].every((d) => d.hydrated)) {
+            const resolve = this._resolveReady
             this._resolveReady = null
+            resolve()
           }
           break
         }

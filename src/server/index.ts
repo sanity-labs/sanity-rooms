@@ -1,6 +1,6 @@
 export type { AppChannelHandler, RoomConfig, RoomDocConfig } from './room'
 export { Room } from './room'
-export type { RoomFactory } from './room-manager'
+export type { RoomFactory, RoomManagerOptions } from './room-manager'
 export { RoomManager } from './room-manager'
 export type { RefDocWrite, SanityBridgeOptions, SanityResource } from './sanity-bridge'
 export { SanityBridge } from './sanity-bridge'

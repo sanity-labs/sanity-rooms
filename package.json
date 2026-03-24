@@ -40,6 +40,18 @@
       "require": "./dist/testing/index.cjs",
       "default": "./dist/testing/index.js"
     },
+    "./transport/ws-client": {
+      "development": "./src/transport/ws-client-transport.ts",
+      "source": "./src/transport/ws-client-transport.ts",
+      "import": "./dist/transport/ws-client-transport.js",
+      "default": "./dist/transport/ws-client-transport.js"
+    },
+    "./transport/ws-server": {
+      "development": "./src/transport/ws-server-transport.ts",
+      "source": "./src/transport/ws-server-transport.ts",
+      "import": "./dist/transport/ws-server-transport.js",
+      "default": "./dist/transport/ws-server-transport.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

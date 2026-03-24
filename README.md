@@ -29,7 +29,91 @@ A coordination layer between `@sanity/sdk` (Sanity connection) and your app (mul
 | Auth, permissions | No | Your app / transport layer |
 | GROQ queries | Not yet | Planned: local evaluation via `groq-js` with optimistic state |
 | AI chat, streaming | No | App channel (`room.registerAppChannel('chat', ...)`) |
-| WebSocket server | No | Your app provides a `Transport` adapter |
+| WebSocket server | No | Built-in `WsServerTransport` or your own `Transport` adapter |
+
+## Quick Start
+
+```typescript
+// Server: create a room
+import { Room, RoomManager } from 'sanity-rooms/server'
+import { WsServerTransport } from 'sanity-rooms/transport/ws-server'
+
+const manager = new RoomManager({
+  instance: sanityInstance,
+  resource: { projectId: 'xxx', dataset: 'production' },
+  factory: {
+    async create(roomId) {
+      return {
+        documents: {
+          config: {
+            docId: roomId,
+            mapping: {
+              documentType: 'myDocument',
+              fromSanity: (doc) => doc,
+              toSanityPatch: (state) => ({ patch: state }),
+              applyMutation: (state, mutation) =>
+                mutation.kind === 'replace' ? mutation.state : null,
+            },
+          },
+        },
+      }
+    },
+  },
+  readyTimeoutMs: 15000,  // optional, default 15s
+  logger: console,         // optional, default console
+})
+
+// On WebSocket upgrade:
+const room = await manager.getOrCreate(roomId)
+const transport = new WsServerTransport(clientId, ws)
+room.addClient(transport)
+```
+
+```typescript
+// Client: connect and sync
+import { SyncClient } from 'sanity-rooms/client'
+import { WsClientTransport } from 'sanity-rooms/transport/ws-client'
+
+const transport = new WsClientTransport('wss://example.com/ws/my-room')
+const client = new SyncClient({
+  transport,
+  documents: {
+    config: {
+      applyMutation: (state, mutation) =>
+        mutation.kind === 'replace' ? mutation.state : null,
+    },
+  },
+})
+
+await client.ready // wait for hydration
+
+// Read state
+const state = client.getDocState('config')
+
+// Mutate (optimistic, debounced)
+client.mutate('config', { kind: 'replace', state: { ...state, title: 'Hello' } })
+
+// Check for unsaved changes
+client.hasPendingWrites() // boolean
+client.getPendingCount()  // number
+
+// React integration (~10 lines)
+function useDocState<T>(client: SyncClient, docId: string): T {
+  return useSyncExternalStore(
+    (cb) => client.subscribeDoc(docId, cb),
+    () => client.getDocState<T>(docId),
+  )
+}
+```
+
+## Built-in Transports
+
+| Transport | Import | Environment |
+|-----------|--------|-------------|
+| `WsClientTransport` | `sanity-rooms/transport/ws-client` | Browser — reconnecting WebSocket with exponential backoff |
+| `WsServerTransport` | `sanity-rooms/transport/ws-server` | Node — wraps `ws` WebSocket. Peer dep on `ws`. |
+
+Both are optional — you can implement the 4-method `Transport` / `ServerTransport` interface yourself.
 
 ## Architecture
 
@@ -56,8 +140,10 @@ SyncClient <--+    +----------------+        +-- resolveRefs + fromSanityWithRef
 
 | Export | Import | Contains |
 |--------|--------|----------|
-| `.` | `import { ... } from 'sanity-rooms'` | Types, protocol, transport, mapping, channel helpers, debounce, reconcile |
+| `.` | `import { ... } from 'sanity-rooms'` | Types, protocol, transport interfaces, mapping, Logger, channel helpers, debounce, reconcile |
 | `./server` | `import { Room, RoomManager } from 'sanity-rooms/server'` | Room, RoomManager, SanityBridge, SanityResource |
+| `./transport/ws-client` | `import { WsClientTransport } from 'sanity-rooms/transport/ws-client'` | Browser WebSocket with reconnect |
+| `./transport/ws-server` | `import { WsServerTransport } from 'sanity-rooms/transport/ws-server'` | Node `ws` adapter |
 | `./client` | `import { SyncClient } from 'sanity-rooms/client'` | SyncClient, MutationQueue |
 | `./testing` | `import { createMemoryTransportPair, createMockSanity } from 'sanity-rooms/testing'` | In-process transport, mock SDK |
 
@@ -210,6 +296,83 @@ The caller sends `{ kind: 'replace', state: fullNewState }` — the simplest pos
 4. **Server** — applies patches to its state, writes to Sanity via `toSanityPatch` (handles ref docs), broadcasts full state to other clients.
 5. **External changes** — when the server broadcasts state from another client or AI, `SyncClient` reapplies unsent local changes on top using `@sanity/mutator`. Since patches are per-key and per-array-item (`_key`), concurrent edits to different parts of the document compose correctly.
 6. **Reconnect** — full reset to server state. Unsent local edits are lost (same as any unsaved work).
+
+## Mutation types
+
+Four kinds of mutations flow through the protocol:
+
+| Kind | When | Who produces it |
+|------|------|-----------------|
+| `replace` | Full state update (UI edits) | Your app calls `client.mutate('doc', { kind: 'replace', state: newState })` |
+| `sanityPatch` | Granular field diffs | SyncClient internally (from `replace` at flush time via `@sanity/diff-patch`) |
+| `named` | Intent-based (e.g. "addFrame") | Your app, for mutations the server interprets |
+| `merge` | Shallow key merge | Internal |
+
+**For most apps, you only need `replace`.** The SyncClient handles diffing internally. Named mutations are useful when the server needs to interpret intent (e.g., AI tool calls that the server validates before applying).
+
+```typescript
+// Replace — simplest, most common
+client.mutate('config', { kind: 'replace', state: newFullState })
+
+// Named — server-interpreted intent
+client.mutate('config', { kind: 'named', name: 'addFrame', input: { text: 'Hello' } })
+```
+
+## RoomManager auth pattern
+
+The `RoomManager.factory.create()` receives an optional `context` argument (passed from `getOrCreate`). Use it for auth:
+
+```typescript
+const manager = new RoomManager({
+  instance, resource,
+  factory: {
+    async create(roomId, context) {
+      const user = context as SessionUser  // your auth type
+
+      // Fetch doc + verify ownership
+      const doc = await sanityClient.fetch(
+        `*[_type == "myDoc" && shortId == $id]{ _id, owner }[0]`,
+        { id: roomId },
+      )
+      if (!doc || doc.owner?._ref !== user.id) return null  // reject
+
+      return {
+        documents: {
+          config: { docId: doc._id, mapping: myMapping },
+        },
+      }
+    },
+  },
+})
+
+// On WS upgrade — pass the authenticated user as context
+const room = await manager.getOrCreate(roomId, authenticatedUser)
+if (!room) { socket.destroy(); return }
+```
+
+## Error handling
+
+- **Room.publish()** returns `{ success: false, error: string }` on failure — never throws.
+- **SyncClient.mutate()** throws if the client is disposed or the doc isn't hydrated.
+- **SyncClient.getDocState()** throws if disposed, unknown doc, or not hydrated.
+- **App channel handlers** are wrapped in try-catch — a throwing handler logs the error but doesn't crash the room.
+- **RoomManager** logs and returns `null` if room creation times out or the factory rejects.
+
+All logging goes through the configurable `Logger` interface (defaults to `console`):
+
+```typescript
+import type { Logger } from 'sanity-rooms'
+
+const logger: Logger = {
+  error: (...args) => myMonitoring.captureError(...args),
+  warn: console.warn,
+  info: console.info,
+  debug: () => {},  // suppress debug in production
+}
+
+new RoomManager({ instance, resource, factory, logger })
+new Room({ documents: { ... }, logger }, instance, resource)
+```
 
 ## Document references
 
