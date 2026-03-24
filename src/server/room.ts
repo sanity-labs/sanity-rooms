@@ -79,6 +79,7 @@ export class Room {
   private updatingRefs = new Set<string>()
 
   /** Resolves when all doc bridges have received their first state from the SDK. */
+  // biome-ignore lint/suspicious/noConfusingVoidType: standard Promise.all return type
   readonly ready: Promise<void[]>
 
   private onDisposeListeners: Array<() => void> = []
