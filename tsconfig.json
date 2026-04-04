@@ -5,6 +5,7 @@
     "lib": ["ES2022", "DOM"],
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    "customConditions": ["development"],
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "verbatimModuleSyntax": true,
