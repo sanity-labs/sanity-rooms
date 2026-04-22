@@ -105,17 +105,19 @@ export class SanityBridge {
 
     if (refDocs) {
       for (const ref of refDocs) {
+        // Strip the drafts. prefix so the knownRefDocs lookup agrees with
+        // markRefDocKnown (which also strips). Without this, docs already
+        // existing in Sanity get a second createDocument attempt that fails
+        // with "draft already exists" and aborts the whole transaction.
+        const bareRefId = ref.docId.replace(/^drafts\./, '')
         const refHandle = createDocumentHandle({
-          documentId: ref.docId,
+          documentId: bareRefId,
           documentType: ref.documentType,
           ...this.resource,
         })
-        // editDocument fails on non-existent docs — create first if new.
-        // knownRefDocs tracks docs we've already created, so we only
-        // create once. Subsequent writes just edit.
-        if (!this.knownRefDocs.has(ref.docId)) {
+        if (!this.knownRefDocs.has(bareRefId)) {
           actions.push(createDocument(refHandle))
-          this.knownRefDocs.add(ref.docId)
+          this.knownRefDocs.add(bareRefId)
         }
         actions.push(editDocument(refHandle, { set: ref.content }))
       }
