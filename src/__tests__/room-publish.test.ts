@@ -96,7 +96,10 @@ const refMapping: DocumentMapping<RefState> = {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 async function makeRoom(mapping: DocumentMapping<any>, initialDoc: Record<string, unknown>) {
-  const mock = createMockSanity({ 'doc-1': initialDoc })
+  // Seed with `_id: 'drafts.doc-1'` so the bridge sees a pending draft —
+  // matches real SDK behavior where editDocument creates drafts.X. Tests that
+  // want to simulate "already-published, no draft" should override _id explicitly.
+  const mock = createMockSanity({ 'doc-1': { _id: 'drafts.doc-1', ...initialDoc } })
   const room = new Room(
     { documents: { config: { docId: 'doc-1', mapping } }, gracePeriodMs: 100 },
     mock.instance,
@@ -137,10 +140,11 @@ describe('Room.publish', () => {
   it('publishes ref docs before main doc', async () => {
     const mock = createMockSanity({
       'doc-1': {
+        _id: 'drafts.doc-1',
         value: 10,
         items: [{ _ref: 'item-alpha', _key: 'k0', _type: 'reference', _weak: true }],
       },
-      'item-alpha': { _type: 'item', name: 'alpha', data: 'hello' },
+      'item-alpha': { _id: 'drafts.item-alpha', _type: 'item', name: 'alpha', data: 'hello' },
     })
 
     const room = new Room(
@@ -170,6 +174,7 @@ describe('Room.publish', () => {
   it('strips weak ref markers on publish', async () => {
     const mock = createMockSanity({
       'doc-1': {
+        _id: 'drafts.doc-1',
         value: 1,
         items: [
           {
@@ -199,6 +204,95 @@ describe('Room.publish', () => {
     expect(ref?._strengthenOnPublish).toBeUndefined()
 
     await room.dispose()
+  })
+
+  // Regression: real SDK's publishDocument throws "no draft version was found"
+  // for docs that have only a published version (no pending changes). Before
+  // the hasDraft() guard, Room.publish would blindly add publish actions for
+  // every ref bridge, causing the whole transaction to abort and the main
+  // doc's publish to fail too. Production users hit this when a message
+  // referenced custom backgrounds that were already published with no edits.
+  describe('no-draft handling', () => {
+    it('skips ref docs that have no draft', async () => {
+      const mock = createMockSanity({
+        'doc-1': {
+          _id: 'drafts.doc-1',
+          value: 10,
+          items: [{ _ref: 'item-alpha', _key: 'k0', _type: 'reference', _weak: true }],
+        },
+        // Ref doc has only the published version — no `drafts.` prefix
+        'item-alpha': { _id: 'item-alpha', _type: 'item', name: 'alpha', data: 'hello' },
+      })
+
+      const room = new Room(
+        { documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      await room.ready
+      await flushMicrotasks()
+      await flushMicrotasks()
+
+      // Without the hasDraft() guard, this would throw because the SDK rejects
+      // publishing a doc that has no draft.
+      const result = await room.publish('config')
+      expect(result.success).toBe(true)
+      expect(result.error).toBeUndefined()
+
+      // Main doc was published (it had a draft)
+      expect(mock.getDoc('published:doc-1')).toBeDefined()
+
+      await room.dispose()
+    })
+
+    it('skips main doc that has no draft (idempotent re-publish)', async () => {
+      const mock = createMockSanity({
+        // No draft for main doc — represents "already-published, nothing to do"
+        'doc-1': { _id: 'doc-1', value: 5 },
+      })
+
+      const room = new Room(
+        { documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      await room.ready
+
+      const result = await room.publish('config')
+      expect(result.success).toBe(true)
+      expect(result.error).toBeUndefined()
+
+      await room.dispose()
+    })
+
+    it('publishes nothing → success (all docs already at parity)', async () => {
+      const mock = createMockSanity({
+        'doc-1': {
+          _id: 'doc-1',
+          value: 10,
+          items: [{ _ref: 'item-alpha', _key: 'k0', _type: 'reference', _weak: true }],
+        },
+        'item-alpha': { _id: 'item-alpha', _type: 'item', name: 'alpha', data: 'hello' },
+      })
+
+      const room = new Room(
+        { documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      await room.ready
+      await flushMicrotasks()
+      await flushMicrotasks()
+
+      const result = await room.publish('config')
+      expect(result.success).toBe(true)
+
+      // Nothing was published because nothing had a draft
+      expect(mock.getDoc('published:doc-1')).toBeUndefined()
+      expect(mock.getDoc('published:item-alpha')).toBeUndefined()
+
+      await room.dispose()
+    })
   })
 
   it('onMutation fires on mutateDoc', async () => {

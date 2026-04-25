@@ -195,6 +195,14 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
           })
           createdInBatch.add(docId)
         } else if (action.type === 'document.publish') {
+          // Real SDK: publishDocument fails if no draft exists. Mirror that here
+          // so Room.publish's hasDraft() guard is exercised by tests. Drafts are
+          // identified by `_id` starting with `drafts.` (matches real SDK behavior).
+          const currentId = entry.doc._id as string | undefined
+          const hasDraft = typeof currentId === 'string' && currentId.startsWith('drafts.')
+          if (!hasDraft) {
+            throw new Error(`Cannot publish because no draft version was found for document "${docId}".`)
+          }
           // Publish: copy draft to a published entry (strip drafts. prefix)
           const publishedId = docId.replace(/^drafts\./, '')
           const publishedEntry = inst._getOrCreateEntry(`published:${publishedId}`)
@@ -208,6 +216,10 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
           for (const subscriber of publishedEntry.subscribers) {
             subscriber(publishedEntry.doc)
           }
+          // Simulate draft consumption — after publish, only the published
+          // version exists. The entry's _id reflects this so subsequent
+          // hasDraft() checks correctly return false.
+          entry.doc._id = publishedId
         }
 
         // Set _rev like the real SDK does

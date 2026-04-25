@@ -249,10 +249,15 @@ export class Room {
 
     const actions: DocumentAction[] = []
 
-    // 1. Publish ref docs first
+    // 1. Publish ref docs first — but only those that actually have a draft.
+    // Real SDK throws "no draft version was found" if a doc has no draft to
+    // publish, which aborts the whole transaction. Ref docs that haven't been
+    // edited this session (or any session since last publish) have no draft;
+    // skip them silently — there's nothing to publish.
     const refMap = this.refBridges.get(docKey)
     if (refMap) {
       for (const refBridge of refMap.values()) {
+        if (!refBridge.hasDraft()) continue
         actions.push(
           publishDocument(
             createDocumentHandle({
@@ -265,16 +270,24 @@ export class Room {
       }
     }
 
-    // 2. Publish main doc
-    actions.push(
-      publishDocument(
-        createDocumentHandle({
-          documentId: doc.bridge.docId,
-          documentType: doc.bridge.documentType,
-          ...this.resource,
-        }),
-      ),
-    )
+    // 2. Publish main doc — same guard. If the user clicks publish without
+    // having edited (or after the draft was already published), there's
+    // nothing to do; succeed idempotently.
+    if (doc.bridge.hasDraft()) {
+      actions.push(
+        publishDocument(
+          createDocumentHandle({
+            documentId: doc.bridge.docId,
+            documentType: doc.bridge.documentType,
+            ...this.resource,
+          }),
+        ),
+      )
+    }
+
+    // Nothing to publish — all docs are already at parity with their published
+    // versions. Treat as success: the published state is what the user wants.
+    if (actions.length === 0) return { success: true }
 
     try {
       const result = await applyDocumentActions(this.instance, { actions })

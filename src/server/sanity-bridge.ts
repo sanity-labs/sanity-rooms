@@ -85,6 +85,20 @@ export class SanityBridge {
     return this.rawDoc
   }
 
+  /**
+   * Whether a draft version currently exists for this doc.
+   *
+   * Sanity SDK's `getDocumentState` emits the draft when one exists, otherwise
+   * the published version. The `_id` prefix reveals which: `drafts.X` → draft
+   * exists; bare `X` → only published. Used by Room.publish to skip docs that
+   * have nothing to publish (real SDK throws "no draft version was found"
+   * otherwise, aborting the whole publish transaction).
+   */
+  hasDraft(): boolean {
+    const id = this.rawDoc._id
+    return typeof id === 'string' && id.startsWith('drafts.')
+  }
+
   /** Mark a ref doc as already existing in Sanity — prevents createDocument on next write. */
   markRefDocKnown(docId: string): void {
     this.knownRefDocs.add(docId.replace(/^drafts\./, ''))
