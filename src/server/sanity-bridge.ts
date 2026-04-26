@@ -156,12 +156,21 @@ export class SanityBridge {
       ),
     )
 
+    // TEMP DIAG: log when a write fires + when it succeeds so the admin
+    // can correlate UI clicks with Sanity persistence.
+    this.logger.info(`[bridge:${this.docId}] write firing — actions=${actions.length}, txn=${transactionId ?? 'none'}`)
     applyDocumentActions(this.instance, {
       actions,
       ...(transactionId && { transactionId }),
-    }).catch((err) => {
-      this.logger.error(`[bridge:${this.docId}] write error:`, err.message ?? err)
     })
+      .then((result) => {
+        this.logger.info(
+          `[bridge:${this.docId}] write OK — submitted=${typeof result?.submitted === 'function' ? 'pending' : 'sync'}`,
+        )
+      })
+      .catch((err) => {
+        this.logger.error(`[bridge:${this.docId}] write error:`, err.message ?? err)
+      })
   }
 
   /**
