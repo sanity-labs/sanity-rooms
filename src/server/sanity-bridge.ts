@@ -66,17 +66,45 @@ export class SanityBridge {
       ...this.resource,
     })
     const docState = getDocumentState(this.instance, handle)
-    const sub = docState.observable.subscribe((doc) => {
-      if (!doc) return
-      this.rawDoc = doc as Record<string, unknown>
-      if (!this.ready) {
-        this.ready = true
-        for (const w of this.pendingWrites) {
-          this.write(w.patch, w.refDocs, w.transactionId)
+    // FULL observer — without `error` and `complete` handlers, an
+    // errored observable silently drops the failure and the bridge
+    // hangs forever. That's the root cause of the "Room ready
+    // timeout" loop: a doc fails to load (auth, missing doc, network
+    // blip, schema mismatch), the bridge never emits, the room
+    // times out at 15s, and the SAME error repeats on every reconnect
+    // because nothing surfaces what's wrong. Logging here at least
+    // makes the failure visible; we may later want to set
+    // `this.errored` and surface it through the room so clients get
+    // a real status instead of silent retries.
+    const sub = docState.observable.subscribe({
+      next: (doc) => {
+        // SDK fires `null` immediately on subscribe before the doc
+        // resolves; that's expected and silent. The `error:` handler
+        // below surfaces real failures (auth, network, etc.).
+        if (!doc) return
+        this.rawDoc = doc as Record<string, unknown>
+        if (!this.ready) {
+          this.ready = true
+          for (const w of this.pendingWrites) {
+            this.write(w.patch, w.refDocs, w.transactionId)
+          }
+          this.pendingWrites = []
         }
-        this.pendingWrites = []
-      }
-      this.onChange(this.rawDoc)
+        this.onChange(this.rawDoc)
+      },
+      // Without `error`/`complete` handlers an errored observable is
+      // silently dropped and the bridge hangs forever — that's the
+      // root cause of "Room ready timeout" loops where reconnects
+      // keep failing because a doc fails to load (auth, network,
+      // schema mismatch) and nothing surfaces. These two handlers
+      // make the failure visible.
+      error: (err) => {
+        const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
+        this.logger.error(`[bridge:${this.docId}] observable error: ${msg}`)
+      },
+      complete: () => {
+        this.logger.warn(`[bridge:${this.docId}] observable completed unexpectedly — no further updates`)
+      },
     })
     this.unsubscribe = () => sub.unsubscribe()
   }

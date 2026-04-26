@@ -115,16 +115,25 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
       const entry = inst._getOrCreateEntry(docId)
       return {
         observable: {
-          subscribe: (callback: (doc: any) => void) => {
-            entry.subscribers.add(callback)
+          // Accept either a plain `next` callback OR a full Observer
+          // ({next, error, complete}) — matches real RxJS observables.
+          // Production code uses the Observer form so the SanityBridge
+          // can surface SDK errors instead of swallowing them.
+          subscribe: (callbackOrObserver: any) => {
+            const next: (doc: any) => void =
+              typeof callbackOrObserver === 'function' ? callbackOrObserver : callbackOrObserver?.next?.bind(callbackOrObserver)
+            if (typeof next !== 'function') {
+              throw new TypeError('subscribe requires a `next` callback or an Observer with a `next` method')
+            }
+            entry.subscribers.add(next)
             // Emit current state immediately (async like real SDK)
             queueMicrotask(() => {
-              if (entry.subscribers.has(callback)) {
-                callback(entry.doc)
+              if (entry.subscribers.has(next)) {
+                next(entry.doc)
               }
             })
             return {
-              unsubscribe: () => entry.subscribers.delete(callback),
+              unsubscribe: () => entry.subscribers.delete(next),
             }
           },
         },
