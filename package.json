@@ -40,6 +40,20 @@
       "require": "./dist/testing/index.cjs",
       "default": "./dist/testing/index.js"
     },
+    "./react": {
+      "development": "./src/react/index.ts",
+      "source": "./src/react/index.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs",
+      "default": "./dist/react/index.js"
+    },
+    "./vite": {
+      "development": "./src/vite/index.ts",
+      "source": "./src/vite/index.ts",
+      "import": "./dist/vite/index.js",
+      "require": "./dist/vite/index.cjs",
+      "default": "./dist/vite/index.js"
+    },
     "./transport/ws-client": {
       "development": "./src/transport/ws-client-transport.ts",
       "source": "./src/transport/ws-client-transport.ts",
@@ -68,10 +82,23 @@
   "devDependencies": {
     "@sanity/client": "^7.17.0",
     "@sanity/pkg-utils": "^10.4.5",
+    "@types/react": "^19.0.0",
+    "@types/ws": "^8.5.10",
+    "react": "^19.0.0",
     "typescript": "~5.9.3",
-    "vitest": "^4.0.18"
+    "vite": "^7.0.0",
+    "vitest": "^4.0.18",
+    "ws": "^8.18.0"
   },
   "peerDependencies": {
-    "@sanity/client": "^7.17.0"
+    "@sanity/client": "^7.17.0",
+    "react": ">=18",
+    "vite": ">=5",
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "vite": { "optional": true },
+    "ws": { "optional": true }
   }
 }

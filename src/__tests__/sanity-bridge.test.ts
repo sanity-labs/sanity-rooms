@@ -188,4 +188,102 @@ describe('SanityBridge', () => {
     mock.simulateExternalEdit('doc-1', { value: 99 })
     expect(onChange).not.toHaveBeenCalled()
   })
+
+  describe('stall detection', () => {
+    it('fires onStall when SDK never emits within firstEmitTimeoutMs', async () => {
+      vi.useFakeTimers()
+      const mock = createMockSanity()
+      mock.setSilent('missing-doc')
+      const onStall = vi.fn()
+      const bridge = new SanityBridge({
+        instance: mock.instance,
+        resource: mock.resource,
+        docId: 'missing-doc',
+        documentType: 'test',
+        onChange: () => {},
+        firstEmitTimeoutMs: 5000,
+        onStall,
+        logger: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
+      })
+      expect(onStall).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(5001)
+      expect(onStall).toHaveBeenCalledTimes(1)
+      expect(onStall.mock.calls[0]?.[0]).toMatch(/no SDK emit in 5000ms/)
+      bridge.dispose()
+      vi.useRealTimers()
+    })
+
+    it('does NOT fire onStall when doc emits before timeout', async () => {
+      vi.useFakeTimers()
+      const mock = createMockSanity({ 'doc-ok': { value: 1 } })
+      const onStall = vi.fn()
+      const bridge = new SanityBridge({
+        instance: mock.instance,
+        resource: mock.resource,
+        docId: 'doc-ok',
+        documentType: 'test',
+        onChange: () => {},
+        firstEmitTimeoutMs: 5000,
+        onStall,
+      })
+      // Microtask delivers the initial state
+      await vi.advanceTimersByTimeAsync(0)
+      vi.advanceTimersByTime(10000)
+      expect(onStall).not.toHaveBeenCalled()
+      bridge.dispose()
+      vi.useRealTimers()
+    })
+
+    it('disabled when firstEmitTimeoutMs is 0', () => {
+      vi.useFakeTimers()
+      const mock = createMockSanity()
+      mock.setSilent('missing')
+      const onStall = vi.fn()
+      const bridge = new SanityBridge({
+        instance: mock.instance,
+        resource: mock.resource,
+        docId: 'missing',
+        documentType: 'test',
+        onChange: () => {},
+        firstEmitTimeoutMs: 0,
+        onStall,
+      })
+      vi.advanceTimersByTime(60_000)
+      expect(onStall).not.toHaveBeenCalled()
+      bridge.dispose()
+      vi.useRealTimers()
+    })
+  })
+
+  describe('pending writes cap', () => {
+    it('drops oldest buffered write when maxPendingWrites is exceeded', () => {
+      const mock = createMockSanity()
+      mock.setSilent('stuck')
+      let warned = ''
+      const bridge = new SanityBridge({
+        instance: mock.instance,
+        resource: mock.resource,
+        docId: 'stuck',
+        documentType: 'test',
+        onChange: () => {},
+        firstEmitTimeoutMs: 0,
+        maxPendingWrites: 3,
+        logger: {
+          error: () => {},
+          warn: (msg: unknown) => {
+            warned = String(msg)
+          },
+          info: () => {},
+          debug: () => {},
+        },
+      })
+      // 4 writes — first one should be evicted
+      bridge.write({ value: 1 })
+      bridge.write({ value: 2 })
+      bridge.write({ value: 3 })
+      bridge.write({ value: 4 })
+      expect(warned).toMatch(/pending-writes cap/)
+      bridge.dispose()
+    })
+  })
 })

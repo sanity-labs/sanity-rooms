@@ -592,3 +592,84 @@ describe('SyncClient hydration', () => {
     syncClient.dispose()
   })
 })
+
+describe('SyncClient connection state', () => {
+  it('starts in connecting status when no initialState provided', () => {
+    const { syncClient } = makeUnhydratedClient()
+    expect(syncClient.status).toBe('connecting')
+    syncClient.dispose()
+  })
+
+  it('starts in connected status when all docs have initialState', () => {
+    const { syncClient } = makeClient({ count: 0 })
+    expect(syncClient.status).toBe('connected')
+    syncClient.dispose()
+  })
+
+  it('flips to connected on first state message', async () => {
+    const { syncClient, server } = makeUnhydratedClient()
+    expect(syncClient.status).toBe('connecting')
+    const seen: string[] = []
+    syncClient.onStatus((s) => seen.push(s))
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 1 } } satisfies ServerMsg)
+    await flushMicrotasks()
+    expect(syncClient.status).toBe('connected')
+    expect(seen).toEqual(['connected'])
+    syncClient.dispose()
+  })
+
+  it('ready rejects when transport closes before hydration', async () => {
+    const { syncClient, transport } = makeUnhydratedClient()
+    transport.close()
+    await expect(syncClient.ready).rejects.toThrow(/before initial hydration/)
+    syncClient.dispose()
+  })
+
+  it('ready rejects on dispose before hydration', async () => {
+    const { syncClient } = makeUnhydratedClient()
+    syncClient.dispose()
+    await expect(syncClient.ready).rejects.toThrow(/disposed before initial hydration/)
+  })
+
+  it('does not double-reject on subsequent transport closes', async () => {
+    const { syncClient, server, transport } = makeUnhydratedClient()
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 1 } } satisfies ServerMsg)
+    await flushMicrotasks()
+    await syncClient.ready // hydrated
+    // Now closing should NOT throw / reject — already resolved.
+    transport.close()
+    await syncClient.ready // still resolves
+    expect(syncClient.status).toBe('disconnected')
+    syncClient.dispose()
+  })
+
+  it('emits connecting on transport.onOpen during a reconnect', async () => {
+    // makeUnhydratedClient uses memory transport which has no onOpen,
+    // so we simulate by exposing the open handler manually.
+    const { client: transport, server } = createMemoryTransportPair()
+    const openHandlers = new Set<() => void>()
+    ;(transport as unknown as { onOpen(h: () => void): () => void }).onOpen = (h: () => void) => {
+      openHandlers.add(h)
+      return () => openHandlers.delete(h)
+    }
+    const syncClient = new SyncClient({
+      transport,
+      documents: { main: { applyMutation: replaceApply } },
+      sendDebounce: { ms: 0, maxWaitMs: 0 },
+    })
+    // Bring through a hydration → connected
+    server.send({ channel: 'doc:main', type: 'state', state: { count: 0 } } satisfies ServerMsg)
+    await flushMicrotasks()
+    expect(syncClient.status).toBe('connected')
+    // Close → disconnected
+    transport.close()
+    expect(syncClient.status).toBe('disconnected')
+    // Simulate reconnect open → connecting
+    const seen: string[] = []
+    syncClient.onStatus((s) => seen.push(s))
+    for (const h of openHandlers) h()
+    expect(syncClient.status).toBe('connecting')
+    expect(seen).toContain('connecting')
+    syncClient.dispose()
+  })
+})

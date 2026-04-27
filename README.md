@@ -24,9 +24,13 @@ A coordination layer between `@sanity/sdk` and your app. It handles:
 ```typescript
 import { RoomManager } from 'sanity-rooms/server'
 import { WsServerTransport } from 'sanity-rooms/transport/ws-server'
+import { createSanityInstance } from '@sanity/sdk'
 
 const manager = new RoomManager({
-  instance: sanityInstance,
+  // `instanceFactory` lets RoomManager own the SDK lifecycle and
+  // recover from stalls. See "Resilience" below. Pass a literal
+  // `instance:` instead if you want full control (e.g. tests).
+  instanceFactory: () => createSanityInstance({ projectId: 'xxx', dataset: 'production', auth: { token } }),
   resource: { projectId: 'xxx', dataset: 'production' },
   factory: {
     async create(roomId, context) {
@@ -221,7 +225,8 @@ const room = await manager.getOrCreate(roomId, authenticatedUser)
 - `Room.publish()` returns `{ success: false, error }` — never throws
 - `SyncClient.mutate()` / `getDocState()` / `sendApp()` throw if disposed or not hydrated
 - App channel handlers are wrapped in try-catch — errors are logged, room keeps running
-- `RoomManager` returns `null` on timeout or factory rejection
+- `RoomManager.getOrCreate()` returns `null` on factory rejection or ready-timeout
+- `SyncClient.ready` **rejects** if the transport closes or the client is disposed before the first hydration — callers can `await client.ready` and surface a real "couldn't reach the server" UI instead of waiting forever
 
 All logging goes through a configurable `Logger` interface (default: `console`):
 
@@ -231,6 +236,47 @@ const logger: Logger = { error: Sentry.captureException, warn: console.warn, inf
 new RoomManager({ instance, resource, factory, logger })
 ```
 
+## Resilience
+
+### Connection state
+
+`SyncClient.status` is `'connecting' | 'connected' | 'disconnected'`. Initial state is `'connecting'` — apps can show a real reconnect affordance during first connect AND during reconnects.
+
+```typescript
+client.onStatus((status) => setReconnecting(status !== 'connected'))
+```
+
+`client.ready` rejects (instead of hanging) if the transport closes before the first hydration. Callers can `await client.ready` and surface a real error UI.
+
+### SDK lifecycle
+
+Pass `instanceFactory` so the manager owns the SDK — `manager.dispose()` then disposes the SDK too.
+
+```typescript
+new RoomManager({
+  instanceFactory: () => createSanityInstance({ projectId, dataset, auth: { token } }),
+  resource: { projectId, dataset },
+  factory: { /* … */ },
+  readyTimeoutMs: 15_000,  // default
+})
+```
+
+### Diagnostic stall detection (opt in)
+
+`SanityBridge` accepts `firstEmitTimeoutMs` (default `0`, off). When set, the bridge fires `onStall(reason)` if the SDK observable hasn't emitted a non-null doc in that window — useful for surfacing missing-doc / auth / schema issues with a clear reason.
+
+```typescript
+new SanityBridge({
+  ...,
+  firstEmitTimeoutMs: 10_000,
+  onStall: (reason) => logger.warn(reason),
+})
+```
+
+### Buffer cap
+
+A stalled bridge caps its pending-writes queue at `maxPendingWrites` (default 200) — oldest dropped first since the newest replace state supersedes them.
+
 ## Custom transports
 
 The built-in `WsClientTransport` and `WsServerTransport` cover most cases. For other protocols, implement the interface:
@@ -239,7 +285,8 @@ The built-in `WsClientTransport` and `WsServerTransport` cover most cases. For o
 interface Transport {
   send(msg: unknown): void
   onMessage(handler: (msg: unknown) => void): () => void  // returns unsubscribe
-  onClose(handler: () => void): () => void                 // returns unsubscribe
+  onClose(handler: () => void): () => void                // returns unsubscribe
+  onOpen?(handler: () => void): () => void                // optional — lets SyncClient emit 'connecting' on reconnect dial
   close(): void
 }
 
@@ -248,9 +295,10 @@ interface ServerTransport extends Transport {
 }
 ```
 
-For testing, use `createMemoryTransportPair()` from `sanity-rooms/testing` — linked in-process pair, no network.
+For testing, use `createMemoryTransportPair()` from `sanity-rooms/testing` — linked in-process pair, no network. `createMockSanity().setSilent(docId)` simulates a stalled SDK observable so you can exercise stall + recreate paths without a real Sanity project.
 
 ## What's NOT here yet
 
 - **Nested refs** — ref docs can't themselves have refs (one level only)
 - **GROQ query subscriptions** — planned with local evaluation via `groq-js`
+- **SDK auto-recreate on persistent failure** — if a long-running SDK instance drifts into a stuck state, the lib provides no auto-recovery. Apps that need it can dispose + rebuild the manager themselves; the lib intentionally doesn't ship the heuristic since "fresh SDK every N timeouts" masks more bugs than it fixes.

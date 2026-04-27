@@ -338,4 +338,124 @@ describe('Room', () => {
 
     await room.dispose()
   })
+
+  describe('missing documents', () => {
+    it('room.ready hangs when the main doc is silent (never emits)', async () => {
+      const mock = createMockSanity()
+      mock.setSilent('missing-main')
+      const room = new Room(
+        { documents: { main: { docId: 'missing-main', mapping: testMapping } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      const settled = await Promise.race([
+        room.ready.then(() => 'resolved' as const).catch(() => 'rejected' as const),
+        new Promise<'pending'>((r) => setTimeout(() => r('pending'), 100)),
+      ])
+      expect(settled).toBe('pending')
+      await room.dispose()
+    })
+
+    it('room.ready resolves when a previously-silent doc starts emitting', async () => {
+      vi.useFakeTimers()
+      const mock = createMockSanity()
+      mock.setSilent('late-doc')
+      const room = new Room(
+        { documents: { main: { docId: 'late-doc', mapping: testMapping } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      // Now an external write makes the doc available
+      mock.setSilent('late-doc', false)
+      mock.simulateExternalEdit('late-doc', { value: 7 })
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(room.ready).resolves.toBeDefined()
+      expect(room.getDocState('main')).toEqual({ value: 7 })
+      await room.dispose()
+    })
+
+    it('room.ready hangs when a resolved ref points to a silent (dangling) doc', async () => {
+      const mock = createMockSanity({
+        'group-1': { value: 1, refs: [{ _ref: 'missing-ref', _key: 'r1' }] },
+      })
+      mock.setSilent('missing-ref') // ref doc never emits
+      const refMapping: DocumentMapping<unknown> = {
+        documentType: 'refType',
+        fromSanity: (d) => d,
+        toSanityPatch: (s) => ({ patch: s as Record<string, unknown> }),
+        applyMutation: () => null,
+      }
+      const mappingWithRefs: DocumentMapping<{ value: number; refs: unknown[] }> = {
+        documentType: 'group',
+        fromSanity: (d) => ({ value: Number(d.value ?? 0), refs: [] }),
+        fromSanityWithRefs: (d, refDocs) => ({
+          value: Number(d.value ?? 0),
+          refs: [...refDocs.values()],
+        }),
+        toSanityPatch: (s) => ({ patch: { value: s.value } }),
+        applyMutation: () => null,
+        resolveRefs: (d) => {
+          const out: Array<{ key: string; docId: string; mapping: DocumentMapping<unknown> }> = []
+          for (const r of (d.refs as Array<{ _ref?: string; _key?: string }>) ?? []) {
+            if (r._ref && r._key) out.push({ key: r._key, docId: r._ref, mapping: refMapping })
+          }
+          return out
+        },
+      }
+      const room = new Room(
+        { documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      const settled = await Promise.race([
+        room.ready.then(() => 'resolved' as const).catch(() => 'rejected' as const),
+        new Promise<'pending'>((r) => setTimeout(() => r('pending'), 100)),
+      ])
+      expect(settled).toBe('pending')
+      await room.dispose()
+    })
+
+    it('room.ready resolves once the dangling ref doc starts emitting', async () => {
+      vi.useFakeTimers()
+      const mock = createMockSanity({
+        'group-1': { value: 1, refs: [{ _ref: 'late-ref', _key: 'r1' }] },
+      })
+      mock.setSilent('late-ref')
+      const refMapping: DocumentMapping<unknown> = {
+        documentType: 'refType',
+        fromSanity: (d) => d,
+        toSanityPatch: (s) => ({ patch: s as Record<string, unknown> }),
+        applyMutation: () => null,
+      }
+      const mappingWithRefs: DocumentMapping<{ value: number; refs: unknown[] }> = {
+        documentType: 'group',
+        fromSanity: (d) => ({ value: Number(d.value ?? 0), refs: [] }),
+        fromSanityWithRefs: (d, refDocs) => ({
+          value: Number(d.value ?? 0),
+          refs: [...refDocs.values()],
+        }),
+        toSanityPatch: (s) => ({ patch: { value: s.value } }),
+        applyMutation: () => null,
+        resolveRefs: (d) => {
+          const out: Array<{ key: string; docId: string; mapping: DocumentMapping<unknown> }> = []
+          for (const r of (d.refs as Array<{ _ref?: string; _key?: string }>) ?? []) {
+            if (r._ref && r._key) out.push({ key: r._key, docId: r._ref, mapping: refMapping })
+          }
+          return out
+        },
+      }
+      const room = new Room(
+        { documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
+        mock.instance,
+        mock.resource,
+      )
+      mock.setSilent('late-ref', false)
+      mock.simulateExternalEdit('late-ref', { _id: 'late-ref', payload: 'arrived' })
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(room.ready).resolves.toBeDefined()
+      const state = room.getDocState<{ value: number; refs: unknown[] }>('main')
+      expect(state.refs.length).toBe(1)
+      await room.dispose()
+    })
+  })
 })

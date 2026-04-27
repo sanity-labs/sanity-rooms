@@ -1,8 +1,9 @@
 /**
  * RoomManager — manages Room lifecycle with deduplication.
  *
- * Prevents concurrent creation of the same room (pending promise pattern).
- * Rooms auto-remove themselves from the manager when they empty + grace period expires.
+ * Construct with `instanceFactory` to let the manager own the SDK
+ * lifecycle (it's disposed in `dispose()`); or pass a literal
+ * `instance` if the caller manages it.
  */
 
 import type { SanityInstance } from '@sanity/sdk'
@@ -16,7 +17,11 @@ export interface RoomFactory {
 }
 
 export interface RoomManagerOptions {
-  instance: SanityInstance
+  /** Pass either a literal SDK instance OR a factory; the factory
+   *  form makes the manager own the SDK lifecycle (disposed on
+   *  `manager.dispose()`). */
+  instance?: SanityInstance
+  instanceFactory?: () => SanityInstance
   resource: SanityResource
   factory: RoomFactory
   /** Timeout (ms) waiting for room.ready on creation. Default: 15000. */
@@ -29,6 +34,7 @@ export class RoomManager {
   private rooms = new Map<string, Room>()
   private pending = new Map<string, Promise<Room | null>>()
   private instance: SanityInstance
+  private readonly instanceFactory: (() => SanityInstance) | null
   private resource: SanityResource
   private factory: RoomFactory
   private readyTimeoutMs: number
@@ -43,15 +49,19 @@ export class RoomManager {
     factory?: RoomFactory,
   ) {
     if (resource !== undefined && factory !== undefined) {
-      // Legacy 3-arg constructor
       this.instance = instanceOrOptions as SanityInstance
+      this.instanceFactory = null
       this.resource = resource
       this.factory = factory
       this.readyTimeoutMs = 15_000
       this.logger = consoleLogger
     } else {
       const opts = instanceOrOptions as RoomManagerOptions
-      this.instance = opts.instance
+      if (!opts.instance && !opts.instanceFactory) {
+        throw new Error('RoomManager requires either `instance` or `instanceFactory`')
+      }
+      this.instanceFactory = opts.instanceFactory ?? null
+      this.instance = opts.instance ?? opts.instanceFactory!()
       this.resource = opts.resource
       this.factory = opts.factory
       this.readyTimeoutMs = opts.readyTimeoutMs ?? 15_000
@@ -60,9 +70,10 @@ export class RoomManager {
   }
 
   /**
-   * Get an existing room or create one via the factory. Deduplicates concurrent
-   * create calls for the same roomId. Returns null if the factory rejects.
-   * Pass `context` (e.g. authenticated user) to the factory for auth checks.
+   * Get an existing room or create one via the factory. Deduplicates
+   * concurrent create calls for the same roomId. Returns null if the
+   * factory rejects or the room fails to first-emit within
+   * `readyTimeoutMs`.
    */
   async getOrCreate(roomId: string, context?: unknown): Promise<Room | null> {
     const existing = this.rooms.get(roomId)
@@ -86,12 +97,20 @@ export class RoomManager {
     return this.rooms.get(roomId)
   }
 
-  /** Dispose all rooms and clear the manager. */
+  /** Dispose all rooms. Disposes the SDK instance too if the manager
+   *  owns it (i.e. was constructed with `instanceFactory`). */
   async dispose(): Promise<void> {
     const rooms = [...this.rooms.values()]
     this.rooms.clear()
     this.pending.clear()
     await Promise.all(rooms.map((r) => r.dispose()))
+    if (this.instanceFactory) {
+      try {
+        ;(this.instance as { dispose?: () => void }).dispose?.()
+      } catch (err) {
+        this.logger.error('[room-manager] SDK dispose failed:', err)
+      }
+    }
   }
 
   private async createRoom(roomId: string, context: unknown): Promise<Room | null> {

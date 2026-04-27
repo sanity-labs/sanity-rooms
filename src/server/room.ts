@@ -351,10 +351,11 @@ export class Room {
   // ── Internal: doc setup ───────────────────────────────────────────────
 
   private createDoc(key: string, docConfig: RoomDocConfig): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let resolved = false
+      let rejected = false
       const tryResolve = () => {
-        if (resolved) return
+        if (resolved || rejected) return
         const doc = this.docs.get(key)
         if (!doc || doc.state === null) return
         // If this doc has refs, wait until ref bridges have emitted too
@@ -374,9 +375,21 @@ export class Room {
         docId: docConfig.docId,
         documentType: docConfig.mapping.documentType,
         logger: this.logger,
+        onStall: (reason) => {
+          if (resolved || rejected) return
+          rejected = true
+          reject(new Error(reason))
+        },
         onChange: (rawDoc) => {
-          this.handleSanityChange(key, rawDoc)
-          tryResolve()
+          // Defer one microtask: under Vite SSR the SDK's rxjs Subject
+          // can fire a cached value synchronously inside subscribe(),
+          // before this.docs.set runs below. queueMicrotask pushes
+          // this past that race so handleSanityChange always finds
+          // the entry.
+          queueMicrotask(() => {
+            this.handleSanityChange(key, rawDoc)
+            tryResolve()
+          })
         },
       })
 
@@ -466,10 +479,10 @@ export class Room {
           documentType: desc.mapping.documentType,
           logger: this.logger,
           onChange: (_refDoc) => {
-            // Ref doc loaded — tell the parent bridge it exists (so writes use edit, not create)
-            parentDoc?.bridge.markRefDocKnown(desc.docId)
-            // Re-assemble parent state with the now-loaded ref
-            this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {})
+            queueMicrotask(() => {
+              parentDoc?.bridge.markRefDocKnown(desc.docId)
+              this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {})
+            })
           },
         })
         current.set(refKey, refBridge)

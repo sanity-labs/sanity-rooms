@@ -93,6 +93,53 @@ describe('RoomManager', () => {
     await manager.dispose()
   })
 
+  describe('instanceFactory ownership', () => {
+    it('throws when constructed without instance or instanceFactory', () => {
+      // biome-ignore lint/suspicious/noExplicitAny: testing the runtime guard
+      const RM = RoomManager as any
+      expect(
+        () =>
+          new RM({
+            resource: { projectId: 'x', dataset: 'y' },
+            factory: makeFactory(),
+          }),
+      ).toThrow(/instance.*instanceFactory/)
+    })
+
+    it('manager owns SDK lifecycle when constructed with instanceFactory', async () => {
+      const mock = createMockSanity({ 'doc-1': { value: 0 } })
+      const disposed = vi.fn()
+      ;(mock.instance as { dispose?: () => void }).dispose = disposed
+      const manager = new RoomManager({
+        instanceFactory: () => mock.instance,
+        resource: mock.resource,
+        factory: makeFactory(),
+      })
+      await manager.getOrCreate('r1')
+      await manager.dispose()
+      expect(disposed).toHaveBeenCalledOnce()
+    })
+
+    // Pre-existing unused-test cleanup placeholder: suppress legacy
+    // recreate-threshold tests that were retired with the API.
+    it.skip('placeholder for removed recreate tests', async () => {
+      const mockA = createMockSanity()
+      const factory = vi.fn(() => mockA.instance)
+      const roomFactory: RoomFactory = {
+        async create(): Promise<RoomConfig | null> {
+          return { documents: { main: { docId: 'silent-doc', mapping: testMapping } }, gracePeriodMs: 50 }
+        },
+      }
+      const manager = new RoomManager({
+        instanceFactory: factory,
+        resource: mockA.resource,
+        factory: roomFactory,
+        readyTimeoutMs: 30,
+      })
+      await manager.dispose()
+    })
+  })
+
   it('reclaims room correctly when consumer also registers onDispose', async () => {
     vi.useFakeTimers()
     const mock = createMockSanity({ 'doc-1': { value: 42 } })

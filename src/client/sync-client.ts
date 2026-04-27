@@ -54,7 +54,16 @@ interface DocState {
   hydrated: boolean
 }
 
-type StatusListener = (status: 'connected' | 'disconnected') => void
+/**
+ * - `connecting` — initial state, or transport dialling after a close.
+ * - `connected`  — transport open AND at least one doc hydrated since
+ *                  the last open.
+ * - `disconnected` — transport closed; auto-reconnect (if any) will
+ *                    bring us back to `connecting`.
+ */
+export type SyncClientStatus = 'connecting' | 'connected' | 'disconnected'
+
+type StatusListener = (status: SyncClientStatus) => void
 type AppHandler = (payload: unknown) => void
 
 let nextMutationId = 0
@@ -69,15 +78,19 @@ export class SyncClient {
   private unsubClose: (() => void) | null = null
   private statusListeners = new Set<StatusListener>()
   private appHandlers = new Map<string, Set<AppHandler>>()
-  private _status: 'connected' | 'disconnected' = 'connected'
+  private _status: SyncClientStatus = 'connecting'
   private flusher: DebouncedFlusher = createFlusher()
   private pendingSends: ClientMsg[] = []
   private debounceMs: number
   private maxWaitMs: number
   private disposed = false
   private _resolveReady: (() => void) | null = null
+  private _rejectReady: ((err: Error) => void) | null = null
+  private unsubOpen: (() => void) | null = null
 
-  /** Resolves when all docs have received their initial state. */
+  /** Resolves when all docs have received their initial state. Rejects
+   *  if the transport closes before the first hydration so callers can
+   *  surface an honest error UI instead of awaiting forever. */
   readonly ready: Promise<void>
 
   constructor(options: SyncClientOptions) {
@@ -101,19 +114,38 @@ export class SyncClient {
 
     if ([...this.docs.values()].every((d) => d.hydrated)) {
       this.ready = Promise.resolve()
+      this._status = 'connected'
     } else {
-      this.ready = new Promise((resolve) => {
+      this.ready = new Promise((resolve, reject) => {
         this._resolveReady = resolve
+        this._rejectReady = reject
       })
+      this.ready.catch(() => {})
     }
 
     this.unsubMessage = this.transport.onMessage((raw) => {
       if (isServerMsg(raw)) this.handleServerMsg(raw)
     })
     this.unsubClose = this.transport.onClose(() => {
-      this._status = 'disconnected'
-      for (const listener of this.statusListeners) listener('disconnected')
+      if (this._rejectReady) {
+        const reject = this._rejectReady
+        this._resolveReady = null
+        this._rejectReady = null
+        reject(new Error('Transport closed before initial hydration'))
+      }
+      this._setStatus('disconnected')
     })
+    if (this.transport.onOpen) {
+      this.unsubOpen = this.transport.onOpen(() => {
+        if (this._status === 'disconnected') this._setStatus('connecting')
+      })
+    }
+  }
+
+  private _setStatus(next: SyncClientStatus): void {
+    if (this._status === next) return
+    this._status = next
+    for (const listener of this.statusListeners) listener(next)
   }
 
   // ── Document state ──────────────────────────────────────────────────────
@@ -232,7 +264,7 @@ export class SyncClient {
 
   // ── Status ──────────────────────────────────────────────────────────────
 
-  get status(): 'connected' | 'disconnected' {
+  get status(): SyncClientStatus {
     return this._status
   }
 
@@ -253,6 +285,13 @@ export class SyncClient {
     clearFlusher(this.flusher)
     this.unsubMessage?.()
     this.unsubClose?.()
+    this.unsubOpen?.()
+    if (this._rejectReady) {
+      const reject = this._rejectReady
+      this._resolveReady = null
+      this._rejectReady = null
+      reject(new Error('SyncClient disposed before initial hydration'))
+    }
     this.transport.close()
     this.docs.clear()
     this.statusListeners.clear()
@@ -293,12 +332,14 @@ export class SyncClient {
           if (this._resolveReady && [...this.docs.values()].every((d) => d.hydrated)) {
             const resolve = this._resolveReady
             this._resolveReady = null
+            this._rejectReady = null
             resolve()
           }
+          this._setStatus('connected')
           break
         }
 
-        if (this._status === 'disconnected') {
+        if (this._status !== 'connected') {
           // Reconnect: full reset — accept server state, discard unsent local edits
           doc.serverState = received
           doc.localState = received
@@ -308,8 +349,7 @@ export class SyncClient {
           this.pendingSends = this.pendingSends.filter(
             (m) => !(m.type === 'mutate' && m.channel === docChannel(parsed.id)),
           )
-          this._status = 'connected'
-          for (const listener of this.statusListeners) listener('connected')
+          this._setStatus('connected')
         } else if (doc.dirty) {
           // Connected + dirty: reapply unsent local changes on top of fresh server state
           doc.serverState = received

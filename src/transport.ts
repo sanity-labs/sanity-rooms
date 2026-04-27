@@ -11,6 +11,10 @@ export interface Transport {
   onMessage(handler: (msg: unknown) => void): () => void
   /** Register a close/disconnect handler. Returns an unsubscribe function. */
   onClose(handler: () => void): () => void
+  /** Optional. Fires on every successful open (including reconnects).
+   *  When omitted, SyncClient uses the first server message as the
+   *  "connected" signal and can't distinguish "dialling" from "hung". */
+  onOpen?(handler: () => void): () => void
   /** Close the connection. */
   close(): void
 }

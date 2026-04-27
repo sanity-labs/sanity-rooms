@@ -36,6 +36,14 @@ export interface SanityBridgeOptions {
   documentType: string
   onChange: (doc: Record<string, unknown>) => void
   logger?: import('../logger').Logger
+  /** If > 0, surface a stall when no non-null doc has been emitted in
+   *  this window. Default: 0 (off). Useful as a diagnostic when an SDK
+   *  subscription is suspected of hanging. */
+  firstEmitTimeoutMs?: number
+  /** Called once on stall with a one-line reason. */
+  onStall?(reason: string): void
+  /** Max buffered writes while waiting for first emit. Default: 200. */
+  maxPendingWrites?: number
 }
 
 export class SanityBridge {
@@ -46,8 +54,12 @@ export class SanityBridge {
   private readonly resource: SanityResource
   private readonly onChange: (doc: Record<string, unknown>) => void
   private readonly logger: import('../logger').Logger
+  private readonly onStall?: (reason: string) => void
+  private readonly maxPendingWrites: number
   private unsubscribe: (() => void) | null = null
   private ready = false
+  private stallTimer: ReturnType<typeof setTimeout> | null = null
+  private stallReported = false
   private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: RefDocWrite[]; transactionId?: string }> = []
   /** Ref doc IDs we've already created — skip createDocument for these. */
   private knownRefDocs = new Set<string>()
@@ -59,6 +71,24 @@ export class SanityBridge {
     this.documentType = options.documentType
     this.onChange = options.onChange
     this.logger = options.logger ?? console
+    this.onStall = options.onStall
+    this.maxPendingWrites = options.maxPendingWrites ?? 200
+
+    const stallMs = options.firstEmitTimeoutMs ?? 0
+    if (stallMs > 0) {
+      this.stallTimer = setTimeout(() => {
+        if (this.ready) return
+        const reason =
+          `[bridge:${this.docId}] no SDK emit in ${stallMs}ms — likely causes: ` +
+          `(1) doc id does not exist in the dataset, ` +
+          `(2) auth token is missing/invalid for drafts perspective, ` +
+          `(3) schema doesn't include "${this.documentType}", ` +
+          `(4) the SDK's underlying live-listener has stalled and needs the SanityInstance recreated.`
+        this.logger.warn(reason)
+        this.stallReported = true
+        this.onStall?.(reason)
+      }, stallMs)
+    }
 
     const handle = createDocumentHandle({
       documentId: this.docId,
@@ -78,13 +108,17 @@ export class SanityBridge {
     // a real status instead of silent retries.
     const sub = docState.observable.subscribe({
       next: (doc) => {
-        // SDK fires `null` immediately on subscribe before the doc
-        // resolves; that's expected and silent. The `error:` handler
-        // below surfaces real failures (auth, network, etc.).
         if (!doc) return
         this.rawDoc = doc as Record<string, unknown>
         if (!this.ready) {
           this.ready = true
+          if (this.stallTimer) {
+            clearTimeout(this.stallTimer)
+            this.stallTimer = null
+          }
+          if (this.stallReported) {
+            this.logger.info(`[bridge:${this.docId}] recovered after stall — first emit received`)
+          }
           for (const w of this.pendingWrites) {
             this.write(w.patch, w.refDocs, w.transactionId)
           }
@@ -125,6 +159,12 @@ export class SanityBridge {
    */
   write(patch: Record<string, unknown>, refDocs?: RefDocWrite[], transactionId?: string): void {
     if (!this.ready) {
+      if (this.pendingWrites.length >= this.maxPendingWrites) {
+        this.pendingWrites.shift()
+        this.logger.warn(
+          `[bridge:${this.docId}] pending-writes cap (${this.maxPendingWrites}) reached — dropping oldest buffered write`,
+        )
+      }
       this.pendingWrites.push({ patch, refDocs, transactionId })
       return
     }
@@ -189,5 +229,10 @@ export class SanityBridge {
   dispose(): void {
     this.unsubscribe?.()
     this.unsubscribe = null
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer)
+      this.stallTimer = null
+    }
+    this.pendingWrites = []
   }
 }

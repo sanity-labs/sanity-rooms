@@ -25,6 +25,7 @@ export class WsClientTransport implements Transport {
   private ws: WebSocket | null = null
   private messageHandlers = new Set<(msg: unknown) => void>()
   private closeHandlers = new Set<() => void>()
+  private openHandlers = new Set<() => void>()
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private url: string
@@ -65,6 +66,13 @@ export class WsClientTransport implements Transport {
     }
   }
 
+  onOpen(handler: () => void): () => void {
+    this.openHandlers.add(handler)
+    return () => {
+      this.openHandlers.delete(handler)
+    }
+  }
+
   close(): void {
     this.disposed = true
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -77,6 +85,7 @@ export class WsClientTransport implements Transport {
     this.ws.onopen = () => {
       if (this.debug) console.log('[ws] connected')
       this.reconnectAttempt = 0
+      for (const h of this.openHandlers) h()
     }
 
     this.ws.onmessage = (e) => {

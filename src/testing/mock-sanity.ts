@@ -31,6 +31,13 @@ export interface MockSanityInstance {
   getDoc(docId: string): Record<string, unknown> | undefined
   /** Get all patches applied to a document (for assertions). */
   getPatches(docId: string): Array<Record<string, unknown>>
+  /**
+   * Mark a doc id as "silent" — `getDocumentState` returns an observable
+   * that never emits (simulates auth not loaded / SDK live-listener
+   * stalled / doc not found in the dataset). Use to test bridge stall
+   * detection.
+   */
+  setSilent(docId: string, silent?: boolean): void
   /** Resource config for Room/RoomManager. */
   resource: { projectId: string; dataset: string }
 }
@@ -45,6 +52,7 @@ export interface MockSanityInstance {
 export function createMockSanity(initialDocs?: Record<string, Record<string, unknown>>): MockSanityInstance {
   const docs = new Map<string, DocEntry>()
   const patchLog = new Map<string, Array<Record<string, unknown>>>()
+  const silentDocs = new Set<string>()
 
   if (initialDocs) {
     for (const [id, doc] of Object.entries(initialDocs)) {
@@ -75,6 +83,7 @@ export function createMockSanity(initialDocs?: Record<string, Record<string, unk
     // Internal: used by our mock SDK functions
     _docs: docs,
     _patchLog: patchLog,
+    _silentDocs: silentDocs,
     _getOrCreateEntry: getOrCreateEntry,
   } as unknown as SanityInstance
 
@@ -97,6 +106,11 @@ export function createMockSanity(initialDocs?: Record<string, Record<string, unk
     getPatches(docId) {
       return patchLog.get(docId) ?? []
     },
+
+    setSilent(docId, silent = true) {
+      if (silent) silentDocs.add(docId)
+      else silentDocs.delete(docId)
+    },
   }
 }
 
@@ -113,12 +127,11 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
     getDocumentState: (inst: any, handle: any) => {
       const docId = handle.documentId
       const entry = inst._getOrCreateEntry(docId)
+      const isSilent = (inst._silentDocs as Set<string> | undefined)?.has(docId) ?? false
       return {
         observable: {
           // Accept either a plain `next` callback OR a full Observer
           // ({next, error, complete}) — matches real RxJS observables.
-          // Production code uses the Observer form so the SanityBridge
-          // can surface SDK errors instead of swallowing them.
           subscribe: (callbackOrObserver: any) => {
             const next: (doc: any) => void =
               typeof callbackOrObserver === 'function' ? callbackOrObserver : callbackOrObserver?.next?.bind(callbackOrObserver)
@@ -126,12 +139,14 @@ export function createSdkMocks(_defaultMock?: MockSanityInstance) {
               throw new TypeError('subscribe requires a `next` callback or an Observer with a `next` method')
             }
             entry.subscribers.add(next)
-            // Emit current state immediately (async like real SDK)
-            queueMicrotask(() => {
-              if (entry.subscribers.has(next)) {
-                next(entry.doc)
-              }
-            })
+            if (!isSilent) {
+              // Real SDK delivers async; queueMicrotask matches that.
+              queueMicrotask(() => {
+                if (entry.subscribers.has(next)) {
+                  next(entry.doc)
+                }
+              })
+            }
             return {
               unsubscribe: () => entry.subscribers.delete(next),
             }
