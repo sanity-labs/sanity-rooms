@@ -4,6 +4,9 @@
 
 Transport-agnostic, optimistic document synchronization for Sanity. Multi-client rooms with real-time broadcast, a document mapping layer, publishing, and app-defined channels — on top of `@sanity/sdk`.
 
+> 📘 **Building a new app on top of this?** Read [`EXAMPLE.md`](./EXAMPLE.md) first.
+> It's a complete, self-contained walkthrough using a "Mood Board" domain (board doc with inline children + image ref docs) that exercises every concept — `DocumentMapping`, `resolveRefs`, ref dereferencing, image uploads, weak refs, publishing, app channels, multiplayer correctness, HMR, reconnect — and calls out the mistakes that trip up implementers (REST‑instead‑of‑WS, embedded asset refs, custom protocols). The README below is a reference once you've understood the shape.
+
 ## What this is
 
 A coordination layer between `@sanity/sdk` and your app. It handles:

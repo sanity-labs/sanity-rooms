@@ -147,6 +147,20 @@ export class SanityBridge {
     return this.rawDoc
   }
 
+  /**
+   * Whether a draft version currently exists for this doc.
+   *
+   * Sanity SDK's `getDocumentState` emits the draft when one exists, otherwise
+   * the published version. The `_id` prefix reveals which: `drafts.X` → draft
+   * exists; bare `X` → only published. Used by Room.publish to skip docs that
+   * have nothing to publish (real SDK throws "no draft version was found"
+   * otherwise, aborting the whole publish transaction).
+   */
+  hasDraft(): boolean {
+    const id = this.rawDoc._id
+    return typeof id === 'string' && id.startsWith('drafts.')
+  }
+
   /** Mark a ref doc as already existing in Sanity — prevents createDocument on next write. */
   markRefDocKnown(docId: string): void {
     this.knownRefDocs.add(docId.replace(/^drafts\./, ''))
@@ -173,17 +187,19 @@ export class SanityBridge {
 
     if (refDocs) {
       for (const ref of refDocs) {
+        // Strip the drafts. prefix so the knownRefDocs lookup agrees with
+        // markRefDocKnown (which also strips). Without this, docs already
+        // existing in Sanity get a second createDocument attempt that fails
+        // with "draft already exists" and aborts the whole transaction.
+        const bareRefId = ref.docId.replace(/^drafts\./, '')
         const refHandle = createDocumentHandle({
-          documentId: ref.docId,
+          documentId: bareRefId,
           documentType: ref.documentType,
           ...this.resource,
         })
-        // editDocument fails on non-existent docs — create first if new.
-        // knownRefDocs tracks docs we've already created, so we only
-        // create once. Subsequent writes just edit.
-        if (!this.knownRefDocs.has(ref.docId)) {
+        if (!this.knownRefDocs.has(bareRefId)) {
           actions.push(createDocument(refHandle))
-          this.knownRefDocs.add(ref.docId)
+          this.knownRefDocs.add(bareRefId)
         }
         actions.push(editDocument(refHandle, { set: ref.content }))
       }

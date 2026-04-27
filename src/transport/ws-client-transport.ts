@@ -19,6 +19,8 @@ export interface WsClientTransportOptions {
   url: string
   /** Enable console logging of sent/received messages. Default: false. */
   debug?: boolean
+  /** Channel names to suppress from debug logging (e.g. `['presence']`). */
+  debugIgnoreChannels?: string[]
 }
 
 export class WsClientTransport implements Transport {
@@ -30,6 +32,7 @@ export class WsClientTransport implements Transport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private url: string
   private debug: boolean
+  private debugIgnoreChannels: Set<string>
   private disposed = false
 
   constructor(url: string)
@@ -38,16 +41,19 @@ export class WsClientTransport implements Transport {
     if (typeof urlOrOptions === 'string') {
       this.url = urlOrOptions
       this.debug = false
+      this.debugIgnoreChannels = new Set()
     } else {
       this.url = urlOrOptions.url
       this.debug = urlOrOptions.debug ?? false
+      this.debugIgnoreChannels = new Set(urlOrOptions.debugIgnoreChannels)
     }
     this.connect()
   }
 
   send(msg: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      if (this.debug) console.log('[ws:out]', (msg as any).type, (msg as any).channel, msg)
+      if (this.debug && !this.debugIgnoreChannels.has((msg as any).channel))
+        console.log('[ws:out]', (msg as any).type, (msg as any).channel, msg)
       this.ws.send(JSON.stringify(msg))
     }
   }
@@ -91,7 +97,8 @@ export class WsClientTransport implements Transport {
     this.ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string)
-        if (this.debug) console.log('[ws:in]', (msg as any).type, (msg as any).channel, msg)
+        if (this.debug && !this.debugIgnoreChannels.has((msg as any).channel))
+          console.log('[ws:in]', (msg as any).type, (msg as any).channel, msg)
         for (const h of this.messageHandlers) h(msg)
       } catch {
         // ignore malformed messages
