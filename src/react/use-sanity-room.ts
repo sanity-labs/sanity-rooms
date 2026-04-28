@@ -16,7 +16,8 @@ import type { DocConfig, SyncClientStatus } from '../client/sync-client'
 import { SyncClient } from '../client/sync-client'
 import type { Mutation } from '../mutation'
 import type { Transport } from '../transport'
-import { WsClientTransport } from '../transport/ws-client-transport'
+// Self-reference via the public export path — see server/upgrade.ts for why.
+import { WsClientTransport } from 'sanity-rooms/transport/ws-client'
 
 export interface UseSanityRoomOptions {
   /**

@@ -17,7 +17,12 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer } from 'ws'
-import { WsServerTransport } from '../transport/ws-server-transport'
+// Self-reference via the public export path (not a relative import) —
+// `pkg-utils build --strict` flags cross-entry relative imports as a
+// conflict (the file is both an entry AND a non-external local module).
+// The "development" / "source" export conditions resolve this back to
+// the .ts source for HMR; prod build uses the dist .js.
+import { WsServerTransport } from 'sanity-rooms/transport/ws-server'
 import type { RoomManager } from './room-manager'
 
 export interface ParsedRoomUpgradePath {
