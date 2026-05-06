@@ -51,21 +51,49 @@ export function sanityRoomsPlugin(options: SanityRoomsPluginOptions): Plugin {
   const watchSubstrings = options.watchPaths ?? DEFAULT_WATCH_SUBSTRINGS
   const prefix = options.logPrefix ?? '[sanity-rooms]'
   let manager: AppManager | null = null
+  /** Single in-flight `loadManager()` promise. Coalesces concurrent
+   *  callers (initial-load + hot-reload + upgrade-arrives-mid-reload)
+   *  so we never spawn two managers in parallel. Cleared once the
+   *  load resolves. */
+  let loading: Promise<AppManager> | null = null
 
   return {
     name: 'sanity-rooms-vite',
     configureServer(server: ViteDevServer) {
-      const loadManager = async () => {
-        try {
-          if (manager?.dispose) await manager.dispose()
-        } catch (err) {
-          console.error(`${prefix} prior dispose failed:`, err)
-        }
-        const mod = (await server.ssrLoadModule(options.roomManagerPath)) as AppManagerModule
-        if (typeof mod.createRoomManager !== 'function') {
-          throw new Error(`${prefix} ${options.roomManagerPath} must export createRoomManager()`)
-        }
-        manager = mod.createRoomManager()
+      const loadManager = (): Promise<AppManager> => {
+        // Coalesce concurrent loads. Without this, an upgrade arriving
+        // during a watcher-triggered reload would kick off a parallel
+        // ssrLoadModule + createRoomManager — racing two SDK
+        // instances and two WSS layers.
+        if (loading) return loading
+
+        // Null `manager` BEFORE awaiting the previous dispose so any
+        // upgrade event that fires during the dispose window doesn't
+        // route into the dying manager. The upgrade handler below
+        // waits on `loading` instead and gets the new instance.
+        const previous = manager
+        manager = null
+
+        loading = (async () => {
+          if (previous?.dispose) {
+            try {
+              await previous.dispose()
+            } catch (err) {
+              console.error(`${prefix} prior dispose failed:`, err)
+            }
+          }
+          const mod = (await server.ssrLoadModule(options.roomManagerPath)) as AppManagerModule
+          if (typeof mod.createRoomManager !== 'function') {
+            throw new Error(`${prefix} ${options.roomManagerPath} must export createRoomManager()`)
+          }
+          const next = mod.createRoomManager()
+          manager = next
+          return next
+        })().finally(() => {
+          loading = null
+        })
+
+        return loading
       }
 
       server.watcher.on('change', async (file) => {
@@ -81,16 +109,18 @@ export function sanityRoomsPlugin(options: SanityRoomsPluginOptions): Plugin {
       server.httpServer?.on('upgrade', async (req, socket, head) => {
         const url = req.url ?? ''
         if (!url.startsWith('/ws/')) return
-        if (!manager) {
-          try {
-            await loadManager()
-          } catch (err) {
-            console.error(`${prefix} initial load failed:`, err)
-            socket.destroy()
-            return
-          }
+        // Wait for any in-flight load (initial or reload) before
+        // routing. If neither manager nor loader is present, kick
+        // off a fresh load.
+        const m = manager ?? (await loadManager().catch((err) => {
+          console.error(`${prefix} load failed during upgrade:`, err)
+          return null
+        }))
+        if (!m) {
+          socket.destroy()
+          return
         }
-        manager?.handleUpgrade(req, socket, head)
+        m.handleUpgrade(req, socket, head)
       })
     },
   }

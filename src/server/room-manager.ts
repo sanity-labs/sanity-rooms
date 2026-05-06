@@ -39,6 +39,7 @@ export class RoomManager {
   private factory: RoomFactory
   private readyTimeoutMs: number
   private logger: Logger
+  private disposed = false
 
   constructor(options: RoomManagerOptions)
   /** @deprecated Use options object instead. */
@@ -74,8 +75,16 @@ export class RoomManager {
    * concurrent create calls for the same roomId. Returns null if the
    * factory rejects or the room fails to first-emit within
    * `readyTimeoutMs`.
+   *
+   * After `dispose()` has been called, returns null without attempting
+   * a new create — the SDK instance is already torn down and any new
+   * Room would leak SDK subscriptions. Hot-reload paths rely on this
+   * to ensure upgrade events arriving mid-dispose don't spawn rooms
+   * on the dying manager.
    */
   async getOrCreate(roomId: string, context?: unknown): Promise<Room | null> {
+    if (this.disposed) return null
+
     const existing = this.rooms.get(roomId)
     if (existing) return existing
 
@@ -98,12 +107,41 @@ export class RoomManager {
   }
 
   /** Dispose all rooms. Disposes the SDK instance too if the manager
-   *  owns it (i.e. was constructed with `instanceFactory`). */
+   *  owns it (i.e. was constructed with `instanceFactory`).
+   *
+   *  Idempotent. Safe to call concurrently with `getOrCreate` — once
+   *  the `disposed` flag is set, new `getOrCreate` calls short-circuit
+   *  to null, so we know nothing fresh will land in `this.pending`
+   *  after the snapshot below. We DO have to wait for in-flight
+   *  creates to settle before disposing rooms, though: `createRoom`
+   *  does `new Room(...)` (which subscribes to SDK observables in its
+   *  bridge constructors) BEFORE registering into `this.rooms`. If we
+   *  cleared rooms without awaiting pending creates, an in-flight
+   *  Room would finish after, register into the cleared map, and
+   *  leak — bridges holding SDK subscriptions, transport sockets
+   *  open, no reference left to dispose it.
+   *
+   *  This was the dominant leak across hot-reloads in Vite-based dev
+   *  setups: every server-source edit fired a manager rebuild while
+   *  voter rooms were mid-`createRoom`, and the leftover Rooms
+   *  accumulated until ephemeral ports ran out. */
   async dispose(): Promise<void> {
+    if (this.disposed) return
+    this.disposed = true
+
+    // Snapshot pending creates and wait for them to settle. Their
+    // `createRoom` bodies will register into `this.rooms` (or
+    // `room.dispose()` on factory failure) before resolving.
+    const inflight = [...this.pending.values()]
+    this.pending.clear()
+    if (inflight.length > 0) {
+      await Promise.allSettled(inflight)
+    }
+
     const rooms = [...this.rooms.values()]
     this.rooms.clear()
-    this.pending.clear()
     await Promise.all(rooms.map((r) => r.dispose()))
+
     if (this.instanceFactory) {
       try {
         ;(this.instance as { dispose?: () => void }).dispose?.()

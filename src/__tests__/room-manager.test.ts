@@ -185,4 +185,77 @@ describe('RoomManager', () => {
 
     await manager.dispose()
   })
+
+  describe('dispose() during in-flight create', () => {
+    it('awaits in-flight create and disposes the resulting room (no leak)', async () => {
+      const mock = createMockSanity({ 'doc-1': { value: 0 } })
+
+      // Hold the factory in flight: `create` awaits a deferred we
+      // control. This simulates the real-world race where a voter
+      // upgrade is mid-handshake (GROQ + ensureVoteRecord) when a
+      // hot-reload triggers `dispose()`.
+      let releaseCreate: () => void = () => undefined
+      const createGate = new Promise<void>((resolve) => {
+        releaseCreate = resolve
+      })
+      const factory: RoomFactory = {
+        async create() {
+          await createGate
+          return { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 50 }
+        },
+      }
+
+      const manager = new RoomManager(mock.instance, mock.resource, factory)
+
+      // Start a getOrCreate that's now blocked inside the factory.
+      const inflight = manager.getOrCreate('r1')
+
+      // Register a dispose-listener on the in-flight room as soon as
+      // it resolves — this proves the manager's `dispose()` reaches
+      // the racing room and closes it. Without the fix, the room
+      // would resolve after `manager.dispose()` returns and would
+      // never have its dispose listener fired.
+      let disposeListenerFired = false
+      const withListener = inflight.then((room) => {
+        if (room) room.onDispose(() => {
+          disposeListenerFired = true
+        })
+        return room
+      })
+
+      // Dispose runs concurrently. It MUST wait for the in-flight
+      // create to settle before clearing rooms.
+      const disposed = manager.dispose()
+
+      // Release the factory so the create can finish.
+      releaseCreate()
+
+      const [room] = await Promise.all([withListener, disposed])
+      expect(room).not.toBeNull()
+      expect(disposeListenerFired).toBe(true)
+      expect(manager.get('r1')).toBeUndefined()
+    })
+
+    it('refuses new getOrCreate calls after dispose', async () => {
+      const mock = createMockSanity({ 'doc-1': { value: 0 } })
+      const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+      await manager.dispose()
+      const result = await manager.getOrCreate('r1')
+      expect(result).toBeNull()
+    })
+
+    it('is idempotent — second dispose() is a no-op', async () => {
+      const mock = createMockSanity({ 'doc-1': { value: 0 } })
+      const manager = new RoomManager({
+        instanceFactory: () => mock.instance,
+        resource: mock.resource,
+        factory: makeFactory(),
+      })
+      const sdkDispose = vi.fn()
+      ;(mock.instance as { dispose?: () => void }).dispose = sdkDispose
+      await manager.dispose()
+      await manager.dispose()
+      expect(sdkDispose).toHaveBeenCalledTimes(1)
+    })
+  })
 })
