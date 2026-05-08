@@ -12,6 +12,7 @@
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
+    "rootDir": "./src",
     "outDir": "./dist",
     "strict": true,
     "noUnusedLocals": true,
