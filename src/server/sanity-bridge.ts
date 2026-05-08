@@ -63,6 +63,8 @@ export class SanityBridge {
   private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: RefDocWrite[]; transactionId?: string }> = []
   /** Ref doc IDs we've already created — skip createDocument for these. */
   private knownRefDocs = new Set<string>()
+  private disposed = false
+  private readonly handle: ReturnType<typeof createDocumentHandle>
 
   constructor(options: SanityBridgeOptions) {
     this.instance = options.instance
@@ -90,22 +92,32 @@ export class SanityBridge {
       }, stallMs)
     }
 
-    const handle = createDocumentHandle({
+    this.handle = createDocumentHandle({
       documentId: this.docId,
       documentType: this.documentType,
       ...this.resource,
     })
-    const docState = getDocumentState(this.instance, handle)
+    this.subscribeToDoc()
+  }
+
+  private subscribeToDoc(): void {
+    if (this.disposed) return
+    const docState = getDocumentState(this.instance, this.handle)
     // FULL observer — without `error` and `complete` handlers, an
     // errored observable silently drops the failure and the bridge
     // hangs forever. That's the root cause of the "Room ready
     // timeout" loop: a doc fails to load (auth, missing doc, network
     // blip, schema mismatch), the bridge never emits, the room
-    // times out at 15s, and the SAME error repeats on every reconnect
-    // because nothing surfaces what's wrong. Logging here at least
-    // makes the failure visible; we may later want to set
-    // `this.errored` and surface it through the room so clients get
-    // a real status instead of silent retries.
+    // times out at 15s.
+    //
+    // On error/complete, we re-subscribe. The SDK's listener welcome
+    // event fires on every fresh subscription and produces a new
+    // `sync` event — that resets the chain reconciler's base
+    // revision and clears whatever stuck buffer caused the
+    // DeadlineExceededError. This makes the bridge resilient to
+    // transient SDK chain failures (e.g. when an external service
+    // mutates the doc and the listener event arrives with a
+    // `previousRev` the SDK couldn't bridge from its last known base).
     const sub = docState.observable.subscribe({
       next: (doc) => {
         if (!doc) return
@@ -134,13 +146,31 @@ export class SanityBridge {
       // make the failure visible.
       error: (err) => {
         const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
-        this.logger.error(`[bridge:${this.docId}] observable error: ${msg}`)
+        // Some SDK errors (DeadlineExceededError, MaxBufferExceededError)
+        // carry a `state` payload with the chain reconciler's view —
+        // base revision + buffered (unchainable) mutation events. Log
+        // it so we can diagnose what events are arriving with mismatched
+        // `previousRev`.
+        const state = (err as { state?: unknown } | undefined)?.state
+        const stateStr = state ? `\nstate=${safeJsonStringify(state)}` : ''
+        this.logger.error(`[bridge:${this.docId}] observable error: ${msg}${stateStr}`)
+        this.handleSubscriptionEnd()
       },
       complete: () => {
-        this.logger.warn(`[bridge:${this.docId}] observable completed unexpectedly — no further updates`)
+        this.logger.warn(`[bridge:${this.docId}] observable completed — re-subscribing`)
+        this.handleSubscriptionEnd()
       },
     })
     this.unsubscribe = () => sub.unsubscribe()
+  }
+
+  /** Dispose the dead subscription and re-subscribe. The new subscription
+   *  triggers a listener welcome → fresh sync event → reset chain. */
+  private handleSubscriptionEnd(): void {
+    if (this.disposed) return
+    this.unsubscribe?.()
+    this.unsubscribe = null
+    this.subscribeToDoc()
   }
 
   getRawDoc(): Record<string, unknown> {
@@ -243,6 +273,7 @@ export class SanityBridge {
   }
 
   dispose(): void {
+    this.disposed = true
     this.unsubscribe?.()
     this.unsubscribe = null
     if (this.stallTimer) {
@@ -250,5 +281,27 @@ export class SanityBridge {
       this.stallTimer = null
     }
     this.pendingWrites = []
+  }
+}
+
+/** JSON.stringify that won't crash on cyclic refs in SDK error state.
+ *  Truncates large strings so the log isn't noise. */
+function safeJsonStringify(v: unknown): string {
+  const seen = new WeakSet<object>()
+  try {
+    return JSON.stringify(
+      v,
+      (_k, val) => {
+        if (typeof val === 'object' && val !== null) {
+          if (seen.has(val)) return '[circular]'
+          seen.add(val)
+        }
+        if (typeof val === 'string' && val.length > 400) return `${val.slice(0, 400)}…`
+        return val
+      },
+      2,
+    )
+  } catch {
+    return String(v)
   }
 }
