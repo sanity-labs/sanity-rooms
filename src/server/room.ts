@@ -422,19 +422,34 @@ export class Room {
    *
    * If ref bridges exist but haven't loaded yet, defers mapping — broadcasting
    * with incomplete refs would strip custom resources from the domain state.
+   *
+   * `fromRef`: true when invoked from a ref bridge's onChange (the parent
+   * `rawDoc` itself didn't change, only one of its referenced docs did).
+   * In that path the ownTxns echo-suppression is skipped — `rawDoc._rev`
+   * is the PARENT's last-known revision, which may still be a previous
+   * own-write of ours, but the actual change we're propagating originated
+   * in a ref doc external to this room's own write ledger. Without this
+   * split, any ref-doc update silently stops broadcasting once the room
+   * has done any direct write to the parent (reactions, lifecycle flips,
+   * etc.) — a long-lived bug in the per-voter voteRecord subscriptions.
    */
-  private handleSanityChange(key: string, rawDoc: Record<string, unknown>): void {
+  private handleSanityChange(key: string, rawDoc: Record<string, unknown>, fromRef = false): void {
     const doc = this.docs.get(key)
     if (!doc) return
 
-    // Skip our own write echoes — we know all our transaction IDs
-    const rev = rawDoc._rev as string | undefined
-    if (rev && doc.ownTxns.has(rev) /* don't delete — SDK may emit same _rev multiple times */) {
-      return
+    // Skip our own write echoes — we know all our transaction IDs.
+    // ONLY meaningful for direct parent-doc emissions; see the docblock.
+    if (!fromRef) {
+      const rev = rawDoc._rev as string | undefined
+      if (rev && doc.ownTxns.has(rev) /* don't delete — SDK may emit same _rev multiple times */) {
+        return
+      }
     }
 
-    // Update ref subscriptions
-    if (doc.mapping.resolveRefs) {
+    // Update ref subscriptions — only when the parent doc itself emitted.
+    // A ref-triggered call passes the (unchanged) cached parent rawDoc, so
+    // re-running resolveRefs would just rebuild the same ref set.
+    if (!fromRef && doc.mapping.resolveRefs) {
       this.updateRefs(key, doc.mapping, rawDoc)
     }
 
@@ -494,7 +509,7 @@ export class Room {
           onChange: (_refDoc) => {
             queueMicrotask(() => {
               parentDoc?.bridge.markRefDocKnown(desc.docId)
-              this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {})
+              this.handleSanityChange(parentKey, this.docs.get(parentKey)?.bridge.getRawDoc() ?? {}, true)
             })
           },
         })

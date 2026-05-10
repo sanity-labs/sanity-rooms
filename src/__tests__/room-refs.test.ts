@@ -265,4 +265,53 @@ describe('Room with refs', () => {
 
     await room.dispose()
   })
+
+  it('ref-doc edits keep propagating after the room has done its own write to the parent', async () => {
+    // Regression: handleSanityChange used to skip ALL changes whose
+    // rawDoc._rev was in ownTxns. Ref-bridge onChange passes the parent's
+    // (cached, unchanged) rawDoc, so once the parent had ANY own-write
+    // recorded, every subsequent ref-doc change silently hit the
+    // own-txn early-return — voters' lock-ins stopped reaching the admin
+    // room any time after the admin reacted, opened voting, etc.
+    const mock = createMockSanity({
+      'doc-1': { value: 1, items: [{ _ref: 'item-x', _key: 'k1', _type: 'reference' }] },
+      'item-x': { name: 'x', data: 'original' },
+    })
+
+    const room = new Room(
+      { documents: { main: { docId: 'doc-1', mapping: testMapping } } },
+      mock.instance,
+      mock.resource,
+    )
+
+    await flushMicrotasks()
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // Step 1: room writes to the parent doc → records own-txn → SDK
+    // echoes the new _rev back. After this, the parent's last-known
+    // rawDoc has a _rev that lives in ownTxns.
+    room.mutateDoc('main', {
+      kind: 'replace',
+      state: { value: 2, items: [{ name: 'x', data: 'original' }] },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    // Step 2: an external edit on the ref doc fires. The ref bridge
+    // onChange triggers re-assembly using the parent's CACHED rawDoc
+    // (unchanged → still has the own-txn _rev). Pre-fix this was
+    // silently dropped at the ownTxns check.
+    mock.simulateExternalEdit('item-x', { name: 'x', data: 'updated-after-own-write' })
+    await flushMicrotasks()
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    const state = room.getDocState<TestConfig>('main')
+    expect(state.items).toHaveLength(1)
+    expect(state.items![0].data).toBe('updated-after-own-write')
+
+    await room.dispose()
+  })
 })
