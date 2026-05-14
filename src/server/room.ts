@@ -453,10 +453,16 @@ export class Room {
       this.updateRefs(key, doc.mapping, rawDoc)
     }
 
-    // If any ref bridges haven't loaded yet, defer — mapping with incomplete
-    // refs would produce state missing custom resources. The ref bridge's
-    // onChange will re-trigger this method once it loads.
-    if (this.hasUnloadedRefs(key)) return
+    // First hydration only: if refs haven't loaded yet, defer — initial
+    // assembly may need them to produce a valid state (e.g. a "must have
+    // an admin" invariant). Once doc.state exists, parent-doc emits ALWAYS
+    // update state with whatever refs are currently loaded; new refs slot
+    // in incrementally as their bridges hydrate. Otherwise a parent change
+    // that introduces new refs (e.g. closedAt flipping on a voter room
+    // causes voteRecord refs to be subscribed) would leave doc.state stale
+    // until every new ref had emitted — and any client reconnecting in
+    // that window would receive the pre-change snapshot from addClient.
+    if (doc.state === null && this.hasUnloadedRefs(key)) return
 
     // Map to domain state (with refs if available)
     const mapped = doc.mapping.fromSanityWithRefs
