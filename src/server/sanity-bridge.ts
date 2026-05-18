@@ -29,6 +29,30 @@ export interface RefDocWrite {
   content: Record<string, unknown>
 }
 
+/**
+ * The outcome of a bridge write attempt, after the SDK has reported back
+ * via `.submitted()`. This is what callers (the Room) need to make
+ * orchestration decisions: ack the client, retry, recreate the SDK
+ * instance, or surface a permanent rejection.
+ *
+ * - `committed`: the server accepted and committed the write. Safe to ACK.
+ * - `rejected`/server: Sanity rejected at the server (schema, ref integrity,
+ *    validation, revision conflict, rate limit). Callers should:
+ *      - if retryable (e.g. 409), rebase against latest and retry
+ *      - if not, surface to client as a permanent rejection
+ * - `rejected`/chain-rot: the SDK's chain reconciler can't progress.
+ *    The caller's owner of this SanityInstance MUST recreate it and replay
+ *    pending writes; this instance is dead for this doc.
+ * - `rejected`/local: the SDK rejected on local apply. Should never happen
+ *    for well-formed patches; treat as a bug + retry once after recreate.
+ * - `buffered`: the bridge is not yet ready (first SDK emit hasn't arrived).
+ *    The write is queued and will be flushed; this Promise resolves when
+ *    the buffered write actually executes, with the real outcome.
+ */
+export type WriteOutcome =
+  | { kind: 'committed'; transactionId: string }
+  | { kind: 'rejected'; transactionId: string; reason: 'server' | 'chain-rot' | 'local'; message: string }
+
 export interface SanityBridgeOptions {
   instance: SanityInstance
   resource: SanityResource
@@ -44,6 +68,25 @@ export interface SanityBridgeOptions {
   onStall?(reason: string): void
   /** Max buffered writes while waiting for first emit. Default: 200. */
   maxPendingWrites?: number
+  /**
+   * Fired once when the bridge detects chain-rot from its `.submitted()`
+   * Promise rejection (DeadlineExceededError or similar). The owner of
+   * this bridge's `SanityInstance` must respond by disposing the
+   * instance and re-creating all bridges that share it — re-subscribing
+   * on the same instance is a no-op (the SDK's internal queued-write
+   * state stays poisoned). Fired at most once per bridge lifetime;
+   * subsequent chain-rot writes are still surfaced via the `WriteOutcome`
+   * but no additional callbacks fire.
+   */
+  onChainRot?: () => void
+  /**
+   * Fired for EVERY write outcome — committed or rejected. Used by the
+   * RoomManager to aggregate metrics (counts by outcome kind/reason).
+   * Pre-F7 these outcomes were only visible in log strings; with
+   * structured metrics, operators can alarm on rejection-rate spikes
+   * before voters lose data.
+   */
+  onWriteOutcome?: (outcome: WriteOutcome) => void
 }
 
 export class SanityBridge {
@@ -55,12 +98,32 @@ export class SanityBridge {
   private readonly onChange: (doc: Record<string, unknown>) => void
   private readonly logger: import('../logger').Logger
   private readonly onStall?: (reason: string) => void
+  private readonly onChainRot?: () => void
+  private readonly onWriteOutcome?: (outcome: WriteOutcome) => void
+  private chainRotSignaled = false
   private readonly maxPendingWrites: number
   private unsubscribe: (() => void) | null = null
   private ready = false
   private stallTimer: ReturnType<typeof setTimeout> | null = null
   private stallReported = false
-  private pendingWrites: Array<{ patch: Record<string, unknown>; refDocs?: RefDocWrite[]; transactionId?: string }> = []
+  private pendingWrites: Array<{
+    patch: Record<string, unknown>
+    refDocs?: RefDocWrite[]
+    transactionId?: string
+    /** Resolves when this buffered write eventually executes. */
+    resolveOutcome: (o: WriteOutcome) => void
+  }> = []
+  /**
+   * In-flight write outcome resolvers, keyed by transactionId. Tracked so
+   * a test affordance (`__testSimulateInflightChainRot`) can force-resolve
+   * still-pending `.submitted()` outcomes as chain-rot — exactly the
+   * shape a real SDK chain reconciler stall produces.
+   *
+   * In production this map fills on every `write()` call and empties as
+   * soon as the SDK's `.submitted()` settles. The only consumer outside
+   * normal write resolution is the test hook below.
+   */
+  private inflightResolvers = new Map<string, (o: WriteOutcome) => void>()
   /** Ref doc IDs we've already created — skip createDocument for these. */
   private knownRefDocs = new Set<string>()
   private disposed = false
@@ -74,6 +137,8 @@ export class SanityBridge {
     this.onChange = options.onChange
     this.logger = options.logger ?? console
     this.onStall = options.onStall
+    this.onChainRot = options.onChainRot
+    this.onWriteOutcome = options.onWriteOutcome
     this.maxPendingWrites = options.maxPendingWrites ?? 200
 
     const stallMs = options.firstEmitTimeoutMs ?? 0
@@ -131,10 +196,13 @@ export class SanityBridge {
           if (this.stallReported) {
             this.logger.info(`[bridge:${this.docId}] recovered after stall — first emit received`)
           }
-          for (const w of this.pendingWrites) {
-            this.write(w.patch, w.refDocs, w.transactionId)
-          }
+          // Flush buffered writes. Each buffered write has a
+          // deferred Promise we resolve with the actual outcome.
+          const toFlush = this.pendingWrites
           this.pendingWrites = []
+          for (const w of toFlush) {
+            this.write(w.patch, w.refDocs, w.transactionId).then(w.resolveOutcome)
+          }
         }
         this.onChange(this.rawDoc)
       },
@@ -154,7 +222,23 @@ export class SanityBridge {
         const state = (err as { state?: unknown } | undefined)?.state
         const stateStr = state ? `\nstate=${safeJsonStringify(state)}` : ''
         this.logger.error(`[bridge:${this.docId}] observable error: ${msg}${stateStr}`)
-        this.handleSubscriptionEnd()
+        const isChainRot = /Did not resolve chain|DeadlineExceededError/.test(msg)
+        if (isChainRot) {
+          // Re-subscribing is a NO-OP for chain rot — the SDK's
+          // internal state is poisoned and the welcome replay will
+          // hit the same unchainable buffer. Signal up so the
+          // RoomManager can dispose the whole SanityInstance and
+          // construct a fresh one. Do NOT call handleSubscriptionEnd
+          // here — that loops on the same instance and produces the
+          // 30+ identical error spam we saw in prod logs.
+          this.maybeSignalChainRot()
+        } else {
+          // Non-chain errors: re-subscribe (this used to recover
+          // transient SDK chain failures via the listener welcome's
+          // fresh sync event; that path was fine for non-chain-rot
+          // errors).
+          this.handleSubscriptionEnd()
+        }
       },
       complete: () => {
         this.logger.warn(`[bridge:${this.docId}] observable completed — re-subscribing`)
@@ -201,16 +285,32 @@ export class SanityBridge {
    * Ref doc creates go first in the action batch so they exist when the main doc
    * edit references them.
    */
-  write(patch: Record<string, unknown>, refDocs?: RefDocWrite[], transactionId?: string): void {
+  write(patch: Record<string, unknown>, refDocs?: RefDocWrite[], transactionId?: string): Promise<WriteOutcome> {
+    const txn = transactionId ?? 'no-txn'
     if (!this.ready) {
       if (this.pendingWrites.length >= this.maxPendingWrites) {
-        this.pendingWrites.shift()
+        const dropped = this.pendingWrites.shift()
+        // Resolve the dropped write with a chain-rot-equivalent
+        // outcome so its caller doesn't await forever.
+        const dropOutcome: WriteOutcome = {
+          kind: 'rejected',
+          transactionId: dropped?.transactionId ?? 'no-txn',
+          reason: 'local',
+          message: `dropped from buffer: pending-writes cap (${this.maxPendingWrites}) reached`,
+        }
+        dropped?.resolveOutcome(dropOutcome)
+        try {
+          this.onWriteOutcome?.(dropOutcome)
+        } catch {
+          /* swallow handler error so we keep cycling the buffer */
+        }
         this.logger.warn(
           `[bridge:${this.docId}] pending-writes cap (${this.maxPendingWrites}) reached — dropping oldest buffered write`,
         )
       }
-      this.pendingWrites.push({ patch, refDocs, transactionId })
-      return
+      return new Promise<WriteOutcome>((resolve) => {
+        this.pendingWrites.push({ patch, refDocs, transactionId, resolveOutcome: resolve })
+      })
     }
 
     const actions: any[] = []
@@ -242,12 +342,155 @@ export class SanityBridge {
       ),
     )
 
-    applyDocumentActions(this.instance, {
-      actions,
-      ...(transactionId && { transactionId }),
-    }).catch((err) => {
-      this.logger.error(`[bridge:${this.docId}] write error:`, err.message ?? err)
+    // (txn is already declared above near the !ready guard)
+    // FORENSIC: log stage1 entry count + first malformed entry shape per write
+    try {
+      const stage1 = (patch as { stage1?: unknown[] }).stage1
+      if (Array.isArray(stage1)) {
+        const bad = stage1.find((e) => !(e as { song?: unknown }).song)
+        if (bad)
+          console.log(
+            `[FORENSIC bridge:${this.docId}] write txn=${txn} stage1.length=${stage1.length} BAD ENTRY: ${JSON.stringify(bad)}`,
+          )
+      }
+    } catch {}
+    // Bridge.write AWAITS the SDK's `.submitted()` Promise so the caller
+    // (Room) sees the actual server-commit outcome. Two phases:
+    //
+    //   1. local-apply phase: `applyDocumentActions(...)` itself. If it
+    //      rejects, the SDK refused to even queue the action (rare —
+    //      bad shape, instance-level failure).
+    //   2. server-commit phase: `result.submitted()`. Resolves when
+    //      Sanity has committed the transaction. Rejects on schema
+    //      violation, ref integrity, validation, revision conflict,
+    //      rate limit, or chain reconciler deadlock (DeadlineExceededError).
+    //
+    // Outcomes flow through `inflightResolvers` — a per-txn deferred
+    // resolver — so a test affordance can synthetically rot in-flight
+    // writes without having to monkey-patch the Sanity SDK. In production
+    // this layer is a pass-through: the resolver fires from the normal
+    // .submitted() success/failure handler exactly once.
+    return new Promise<WriteOutcome>((resolveOuter) => {
+      const completeOutcome = (outcome: WriteOutcome) => {
+        // Idempotent: if the test hook already resolved this txn, skip.
+        if (!this.inflightResolvers.has(txn)) return
+        this.inflightResolvers.delete(txn)
+        try {
+          this.onWriteOutcome?.(outcome)
+        } catch (err) {
+          this.logger.error(
+            `[bridge:${this.docId}] onWriteOutcome handler threw: ${(err as Error)?.message ?? err}`,
+          )
+        }
+        resolveOuter(outcome)
+      }
+      this.inflightResolvers.set(txn, completeOutcome)
+
+      applyDocumentActions(this.instance, {
+        actions,
+        ...(transactionId && { transactionId }),
+      }).then(
+        (result) => {
+          const submitted = (result as { submitted?: () => Promise<unknown> })?.submitted
+          if (typeof submitted !== 'function') {
+            this.logger.warn(`[bridge:${this.docId}] write COMMITTED-no-submitted-api txn=${txn}`)
+            completeOutcome({ kind: 'committed', transactionId: txn })
+            return
+          }
+          ;(submitted.call(result) as Promise<unknown>).then(
+            () => {
+              this.logger.warn(`[bridge:${this.docId}] write COMMITTED txn=${txn}`)
+              completeOutcome({ kind: 'committed', transactionId: txn })
+            },
+            (err) => {
+              const message = (err as Error)?.message ?? String(err)
+              const isChainRot = /Did not resolve chain|DeadlineExceededError/.test(message)
+              this.logger.error(
+                `[bridge:${this.docId}] write SERVER-REJECTED txn=${txn} (${isChainRot ? 'chain-rot' : 'server'}): ${message}`,
+              )
+              if (isChainRot) this.maybeSignalChainRot()
+              completeOutcome({
+                kind: 'rejected',
+                transactionId: txn,
+                reason: isChainRot ? 'chain-rot' : 'server',
+                message,
+              })
+            },
+          )
+        },
+        (err) => {
+          const message = (err as Error)?.message ?? String(err)
+          const isChainRot = /Did not resolve chain|DeadlineExceededError/.test(message)
+          this.logger.error(
+            `[bridge:${this.docId}] write LOCAL-ERR txn=${txn} (${isChainRot ? 'chain-rot' : 'local'}): ${message}`,
+          )
+          if (isChainRot) this.maybeSignalChainRot()
+          completeOutcome({
+            kind: 'rejected',
+            transactionId: txn,
+            reason: isChainRot ? 'chain-rot' : 'local',
+            message,
+          })
+        },
+      )
     })
+  }
+
+  /**
+   * Test affordance — count of currently in-flight write outcome
+   * resolvers. Used by the repro harness to gate the synthetic
+   * chain-rot trigger on "writes actually in flight". Production code
+   * must not call this.
+   */
+  __testInflightWriteCount(): number {
+    return this.inflightResolvers.size
+  }
+
+  /**
+   * Test affordance — DO NOT USE IN PRODUCTION. Force-resolves every
+   * currently in-flight write as a chain-rot rejection AND fires the
+   * `onChainRot` signal. Mirrors what a real SDK chain reconciler stall
+   * produces, but synchronously and deterministically — used by the
+   * repro harness's scenario N to exercise the self-heal replay path.
+   *
+   * Returns the number of in-flight writes that were synthetically rotted.
+   */
+  __testSimulateInflightChainRot(): number {
+    const stale = [...this.inflightResolvers.entries()]
+    this.inflightResolvers.clear()
+    for (const [txn, resolve] of stale) {
+      const outcome: WriteOutcome = {
+        kind: 'rejected',
+        transactionId: txn,
+        reason: 'chain-rot',
+        message: '__testSimulateInflightChainRot: synthetic chain-rot injected for in-flight write',
+      }
+      try {
+        this.onWriteOutcome?.(outcome)
+      } catch {
+        /* noop */
+      }
+      try {
+        resolve(outcome)
+      } catch {
+        /* noop */
+      }
+    }
+    this.maybeSignalChainRot()
+    return stale.length
+  }
+
+  private maybeSignalChainRot(): void {
+    if (this.chainRotSignaled || this.disposed) return
+    this.chainRotSignaled = true
+    this.logger.error(
+      `[bridge:${this.docId}] CHAIN-ROT DETECTED — signaling owner to recreate SanityInstance`,
+    )
+    try {
+      this.onChainRot?.()
+    } catch (err) {
+      this.logger.error(`[bridge:${this.docId}] onChainRot handler threw: ${(err as Error)?.message ?? err}`)
+    }
   }
 
   /**
@@ -273,6 +516,7 @@ export class SanityBridge {
   }
 
   dispose(): void {
+    if (this.disposed) return
     this.disposed = true
     this.unsubscribe?.()
     this.unsubscribe = null
@@ -280,7 +524,58 @@ export class SanityBridge {
       clearTimeout(this.stallTimer)
       this.stallTimer = null
     }
+    // CRITICAL: resolve every buffered write's outcome promise before
+    // clearing the queue, otherwise callers awaiting bridge.write()
+    // hang forever. Treat dispose as a permanent "local" rejection;
+    // the Room can decide what to do with the orphaned mutation
+    // (typically: send `reject` to the originating client so it can
+    // retry on the new bridge after RoomManager swaps the instance).
+    const orphaned = this.pendingWrites
     this.pendingWrites = []
+    for (const w of orphaned) {
+      const disposeOutcome: WriteOutcome = {
+        kind: 'rejected',
+        transactionId: w.transactionId ?? 'no-txn',
+        reason: 'local',
+        message: 'bridge disposed before write was attempted',
+      }
+      try {
+        w.resolveOutcome(disposeOutcome)
+      } catch {
+        /* noop */
+      }
+      try {
+        this.onWriteOutcome?.(disposeOutcome)
+      } catch {
+        /* noop */
+      }
+    }
+
+    // Also drain in-flight write outcome resolvers. Their underlying
+    // applyDocumentActions Promises may still settle later against a
+    // disposed SDK instance — but the Room's resolvePendingMutation
+    // is idempotent (it short-circuits when the entry is absent), so
+    // a stale settle has no effect.
+    const inflight = [...this.inflightResolvers.entries()]
+    this.inflightResolvers.clear()
+    for (const [txn, resolve] of inflight) {
+      const disposeOutcome: WriteOutcome = {
+        kind: 'rejected',
+        transactionId: txn,
+        reason: 'local',
+        message: 'bridge disposed before write completed',
+      }
+      try {
+        this.onWriteOutcome?.(disposeOutcome)
+      } catch {
+        /* noop */
+      }
+      try {
+        resolve(disposeOutcome)
+      } catch {
+        /* noop */
+      }
+    }
   }
 }
 

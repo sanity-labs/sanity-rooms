@@ -155,7 +155,16 @@ export class RoomManager {
     const config = await this.factory.create(roomId, context)
     if (!config) return null
 
-    const room = new Room(config, this.instance, this.resource)
+    // Wire chain-rot signal: if ANY bridge in this room rots, kick off
+    // a recreate of the shared SanityInstance.
+    const augmentedConfig: RoomConfig = {
+      ...config,
+      onChainRot: () => {
+        void this.handleChainRot()
+      },
+    }
+
+    const room = new Room(augmentedConfig, this.instance, this.resource)
     try {
       await Promise.race([
         room.ready,
@@ -174,5 +183,78 @@ export class RoomManager {
     this.rooms.set(roomId, room)
 
     return room
+  }
+
+  /**
+   * Handle a chain-rot signal from any room's bridge. The current
+   * `SanityInstance` is permanently poisoned for the affected doc
+   * (and per scenario K, this can cascade or recur) — the only
+   * recovery is to throw it away and construct a fresh instance,
+   * then re-subscribe every Room's bridges.
+   *
+   * Debounced + serialized: many bridges may fire chain-rot in
+   * quick succession; we only recreate once per burst.
+   */
+  /** Synchronous flag — set BEFORE any work begins so re-entrant
+   *  chain-rot signals (e.g. fresh bridges in recreateBridges
+   *  immediately firing chain-rot from a still-poisoned listener)
+   *  see the guard and return without recursing into a new recovery. */
+  private chainRotInProgress = false
+  /** Backoff so a permanently-broken SDK doesn't get re-recreated in a
+   *  hot loop. After a recovery completes we ignore further chain-rot
+   *  signals for this window. */
+  private chainRotCooldownUntilMs = 0
+  private static readonly CHAIN_ROT_COOLDOWN_MS = 5_000
+
+  private async handleChainRot(): Promise<void> {
+    if (this.disposed) return
+    if (!this.instanceFactory) {
+      this.logger.error(
+        '[room-manager] chain-rot detected but no instanceFactory configured — cannot recreate; pass `instanceFactory` to RoomManager to enable recovery',
+      )
+      return
+    }
+    // Re-entrant guard: any signal fired while we're mid-recovery
+    // (including signals from the NEW bridges if they also rot) is a
+    // no-op. The single in-flight recovery already swapped them in;
+    // if they keep failing, the cooldown will throttle further attempts.
+    if (this.chainRotInProgress) return
+    if (Date.now() < this.chainRotCooldownUntilMs) {
+      this.logger.warn('[room-manager] chain-rot signal ignored — within cooldown window after a recent recovery')
+      return
+    }
+    this.chainRotInProgress = true
+
+    try {
+      this.logger.warn('[room-manager] chain-rot recovery starting — disposing rotted SanityInstance')
+      const oldInstance = this.instance
+      const newInstance = this.instanceFactory!()
+      this.instance = newInstance
+
+      // Tell every active room to swap its bridges to the new instance.
+      // Each room's recreateBridges is awaited sequentially to keep
+      // backpressure on the SDK construction (parallel recreates
+      // would spike network + memory).
+      const snapshot = [...this.rooms.values()]
+      for (const room of snapshot) {
+        try {
+          await room.recreateBridges(newInstance)
+        } catch (err) {
+          this.logger.error(`[room-manager] recreateBridges threw: ${(err as Error)?.message ?? err}`)
+        }
+      }
+
+      // Dispose the old instance last so any lingering ref-bridge
+      // subscriptions don't fail mid-tear-down.
+      try {
+        ;(oldInstance as { dispose?: () => void }).dispose?.()
+      } catch (err) {
+        this.logger.error(`[room-manager] old SDK dispose failed: ${(err as Error)?.message ?? err}`)
+      }
+      this.logger.warn('[room-manager] chain-rot recovery complete — rooms now using fresh SanityInstance')
+    } finally {
+      this.chainRotInProgress = false
+      this.chainRotCooldownUntilMs = Date.now() + RoomManager.CHAIN_ROT_COOLDOWN_MS
+    }
   }
 }

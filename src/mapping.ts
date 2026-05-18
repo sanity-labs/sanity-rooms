@@ -8,6 +8,25 @@
 
 import type { Mutation } from './mutation'
 
+/**
+ * Outcome of classifying a pending mutation against fresh server state
+ * during chain-rot recovery. Determines whether the mutation can be
+ * replayed verbatim, is already at the target, or needs the client to
+ * rebase.
+ *
+ * - `EQUAL`: fresh server state matches the pre-condition exactly —
+ *   nobody else wrote during the rot window. Replay verbatim.
+ * - `EQUAL_TO_AFTER`: fresh server state matches the target — the
+ *   mutation's effect already lives in Sanity (idempotent retry, or
+ *   a different writer reached the same goal). Treat as committed.
+ * - `DIVERGED_COMPATIBLE`: fresh state differs from pre-condition,
+ *   but the divergent fields are disjoint from what this mutation
+ *   touches. Replay is safe — non-overlapping write.
+ * - `DIVERGED_CONFLICTING`: fresh state differs in a way that overlaps
+ *   with this mutation's target fields. Client must rebase.
+ */
+export type Classification = 'EQUAL' | 'EQUAL_TO_AFTER' | 'DIVERGED_COMPATIBLE' | 'DIVERGED_CONFLICTING'
+
 export interface DocumentMapping<TState, TSanityDoc = Record<string, unknown>, TSanityPatch = Record<string, unknown>> {
   /** Sanity document type (e.g. "message") */
   documentType: string
@@ -39,6 +58,31 @@ export interface DocumentMapping<TState, TSanityDoc = Record<string, unknown>, T
    * used on the main doc alone (no ref assembly).
    */
   fromSanityWithRefs?(doc: TSanityDoc, refDocs: Map<string, Record<string, unknown>>): TState
+
+  /**
+   * Self-heal classifier for chain-rot recovery. Called by the Room
+   * when replaying a pending mutation after the underlying
+   * `SanityInstance` has been recreated. The classifier decides
+   * whether the mutation is safe to re-issue.
+   *
+   * Implementations should perform a structural compare on the fields
+   * the mutation actually targets — overly conservative `DIVERGED_CONFLICTING`
+   * is safe (the client will rebase) but causes a visible UI flicker.
+   * Overly optimistic `EQUAL` can overwrite a concurrent writer's
+   * changes — only use it when you can prove no other writer touches
+   * the targeted fields.
+   *
+   * If unspecified, the Room treats every pending mutation as `EQUAL`,
+   * which is correct for single-writer documents (where no other source
+   * can write between rot and recovery) but unsafe for multi-writer
+   * documents — provide an explicit classifier for those.
+   */
+  classify?(
+    freshState: TState,
+    beforeState: TState,
+    afterState: TState,
+    patch: TSanityPatch,
+  ): Classification
 }
 
 /** Result of toSanityPatch — main doc patches + patches for referenced docs. */

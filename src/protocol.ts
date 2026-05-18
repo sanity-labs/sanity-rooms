@@ -53,6 +53,16 @@ export interface ServerRejectMsg {
   type: 'reject'
   mutationId: string
   reason: string
+  /**
+   * Self-heal recovery: when the server has detected that the mutation's
+   * pre-condition is no longer valid (chain-rot recovery surfaced a doc
+   * whose state has moved beyond `beforeState`), it ships the fresh
+   * server state alongside the reject so the SyncClient can rebase
+   * unsent local edits on top instead of dropping them.
+   *
+   * Only populated when `reason` starts with `'rebase-needed'`.
+   */
+  freshServerState?: unknown
 }
 
 export interface ServerQueryResultMsg {

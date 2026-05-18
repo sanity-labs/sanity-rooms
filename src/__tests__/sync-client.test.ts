@@ -360,7 +360,17 @@ describe('SyncClient diff-at-flush', () => {
     syncClient.dispose()
   })
 
-  it('reconnect resets to server state', async () => {
+  it('reconnect preserves unsent local edits via rebase (F6)', async () => {
+    // Pre-F6 this test asserted "Full reset — local unsent edit lost":
+    // when the WS reconnected, the client wiped its dirty localState
+    // and accepted whatever the server's fresh sync said. That was the
+    // single biggest source of silent data loss during the 2026-05-16
+    // incident — a voter who tapped a star during a network blip would
+    // see the change vanish the moment the WS reconnected.
+    //
+    // F6: on reconnect, rebase the diff between `lastSentState` and
+    // `localState` on top of the fresh serverState. Local intent is
+    // preserved, the server's truth for non-conflicting fields wins.
     vi.useFakeTimers()
     const { syncClient } = makeClient({ a: 1, b: 2 })
 
@@ -372,8 +382,8 @@ describe('SyncClient diff-at-flush', () => {
     newServer.send({ channel: 'doc:main', type: 'state', state: { a: 50, b: 100 } } satisfies ServerMsg)
     await vi.advanceTimersByTimeAsync(0)
 
-    // Full reset — local unsent edit lost
-    expect(syncClient.getDocState('main')).toEqual({ a: 50, b: 100 })
+    // Rebased: local change a=99 preserved; server change b=100 accepted.
+    expect(syncClient.getDocState('main')).toEqual({ a: 99, b: 100 })
     expect(syncClient.status).toBe('connected')
     syncClient.dispose()
   })

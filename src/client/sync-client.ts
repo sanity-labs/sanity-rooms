@@ -340,14 +340,41 @@ export class SyncClient {
         }
 
         if (this._status !== 'connected') {
-          // Reconnect: full reset — accept server state, discard unsent local edits
+          // Reconnect-after-disconnect path. The PRIOR behavior was a full
+          // reset: accept server state, discard unsent local edits, clear
+          // the named-mutation queue, and filter mutate messages out of
+          // pendingSends. That semantic was the single biggest source of
+          // silent data loss during the 2026-05-16 incident — a voter who
+          // tapped a star during a network blip would see their local
+          // state get wiped the moment the WS reconnected.
+          //
+          // F6: preserve local intent across reconnect. Rebase the diff
+          // between `lastSentState` and `localState` on top of the fresh
+          // serverState, mirroring the connected+dirty branch below.
+          // Named queue is preserved (its `rebase` already handles
+          // post-reconnect replay).
           doc.serverState = received
-          doc.localState = received
+          if (doc.dirty) {
+            const localChanges = diffValue(doc.lastSentState, doc.localState)
+            if (localChanges.length > 0) {
+              doc.localState = applySanityPatches(received, localChanges)
+              // Re-fire a flush so the rebased diff goes to the server.
+              scheduleFlusher(this.flusher, () => this.flush(), this.debounceMs, this.maxWaitMs)
+            } else {
+              doc.localState = received
+              doc.dirty = false
+            }
+          } else {
+            doc.localState = received
+          }
           doc.lastSentState = received
-          doc.dirty = false
-          doc.queue.clear()
+          // Drop pre-disconnect pendingSends targeting this doc — those
+          // were serialized against the OLD lastSentState (now stale).
+          // The flush above will emit a fresh sanityPatch based on the
+          // rebased localState. Named-queue mutations are intentionally
+          // preserved (the queue rebases itself in `recomputeLocal`).
           this.pendingSends = this.pendingSends.filter(
-            (m) => !(m.type === 'mutate' && m.channel === docChannel(parsed.id)),
+            (m) => !(m.type === 'mutate' && m.channel === docChannel(parsed.id) && m.mutation.kind === 'sanityPatch'),
           )
           this._setStatus('connected')
         } else if (doc.dirty) {
@@ -381,8 +408,45 @@ export class SyncClient {
         break
       }
       case 'reject': {
-        doc.queue.reject(msg.mutationId)
-        this.recomputeLocal(doc)
+        // Self-heal: when the server has detected that the mutation's
+        // pre-condition diverged (DIVERGED_CONFLICTING during chain-rot
+        // recovery), it sends `reason: 'rebase-needed'` with the fresh
+        // server state attached. We adopt the fresh state and rebase any
+        // unsent local edits on top — same shape as the reconnect rebase
+        // (F6), so the voter's optimistic UI flows forward instead of
+        // being wiped back.
+        const rebaseNeeded =
+          typeof msg.reason === 'string' &&
+          msg.reason.startsWith('rebase-needed') &&
+          msg.freshServerState !== undefined
+        if (rebaseNeeded) {
+          const fresh = msg.freshServerState as unknown
+          doc.serverState = fresh
+          if (doc.dirty) {
+            const localChanges = diffValue(doc.lastSentState, doc.localState)
+            if (localChanges.length > 0) {
+              doc.localState = applySanityPatches(fresh, localChanges)
+              // Re-fire a flush so the rebased diff goes to the server.
+              scheduleFlusher(this.flusher, () => this.flush(), this.debounceMs, this.maxWaitMs)
+            } else {
+              doc.localState = fresh
+              doc.dirty = false
+            }
+          } else {
+            doc.localState = fresh
+          }
+          doc.lastSentState = fresh
+          // Recompute with any queued named mutations on top (mirrors the
+          // existing rebase paths).
+          if (doc.queue.hasPending()) {
+            this.recomputeLocal(doc)
+          } else {
+            for (const listener of doc.listeners) listener()
+          }
+        } else {
+          doc.queue.reject(msg.mutationId)
+          this.recomputeLocal(doc)
+        }
         break
       }
     }
@@ -410,6 +474,16 @@ export class SyncClient {
       if (operations.length === 0) {
         doc.dirty = false
         continue
+      }
+
+      // FORENSIC: detect diffMatchPatch operations being sent — these
+      // are the suspected source of phantom-entry corruption per
+      // morphing-clock's patches/@sanity__sdk@2.8.0.patch.
+      const hasDmp = (operations as Array<Record<string, unknown>>).some((op) => op && 'diffMatchPatch' in op)
+      if (hasDmp) {
+        console.log(
+          `[FORENSIC sync-client] doc=${docId} EMITTING diffMatchPatch op(s): ${JSON.stringify(operations)}`,
+        )
       }
 
       const mutationId = generateMutationId()
