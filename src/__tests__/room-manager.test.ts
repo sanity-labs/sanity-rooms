@@ -310,4 +310,156 @@ describe('RoomManager', () => {
       expect(sdkDispose).toHaveBeenCalledTimes(1)
     })
   })
+
+  // ── per-key instance pool race conditions ────────────────────────
+  //
+  // The two cases I flagged when the per-key pooling landed:
+  //
+  // 1. After the last room with key K disposes (refcount→0, instance
+  //    disposed), creating a new room with key K must give a FRESH
+  //    instance — not the disposed one. JS is single-threaded so the
+  //    sync release-then-acquire is atomic; the test pins that the
+  //    factory gets called twice and the new room sees a new instance.
+  //
+  // 2. Two synchronous calls to handleChainRot for the same key (e.g.
+  //    two bridges in two rooms sharing the same instanceKey both
+  //    reject their .submitted() Promise in the same tick) must
+  //    produce exactly ONE recovery cascade — not two. The lazy-init
+  //    of `chainRotByKey` is safe because the `inProgress = true`
+  //    flag is set synchronously before any `await`, so subsequent
+  //    synchronous calls see the guard. The test pins that.
+
+  describe('per-key SanityInstance pooling', () => {
+    it('fresh instance after last-room-disposed-same-key release', async () => {
+      const instances: ReturnType<typeof createMockSanity>['instance'][] = []
+      const factory = vi.fn(() => {
+        const m = createMockSanity({ 'doc-1': { value: 0 } })
+        instances.push(m.instance)
+        return m.instance
+      })
+      const manager = new RoomManager({
+        instanceFactory: factory,
+        resource: { projectId: 'p', dataset: 'd' },
+        factory: makeFactory(),
+      })
+
+      // First room → first instance via factory
+      const r1 = await manager.getOrCreate('r1')
+      expect(r1).not.toBeNull()
+      expect(factory).toHaveBeenCalledTimes(1)
+      const firstInstance = instances[0]
+      const firstDispose = vi.fn()
+      ;(firstInstance as { dispose?: () => void }).dispose = firstDispose
+
+      // Dispose the only room with this key → release → instance disposed.
+      await r1!.dispose()
+      // (Direct dispose-on-room triggers the onDispose hook → releaseInstance.)
+      expect(firstDispose).toHaveBeenCalledTimes(1)
+      expect(manager.getInstanceKeys()).toEqual([])
+
+      // Same key, new room → factory called AGAIN, new instance returned.
+      const r2 = await manager.getOrCreate('r1')
+      expect(r2).not.toBeNull()
+      expect(factory).toHaveBeenCalledTimes(2)
+      expect(instances[1]).not.toBe(instances[0])
+      expect(manager.getInstanceKeys()).toEqual([{ key: 'test', refCount: 1 }])
+
+      await manager.dispose()
+    })
+
+    it('concurrent synchronous chain-rot signals on same key trigger ONE recovery', async () => {
+      const factory = vi.fn(() => createMockSanity({ 'doc-1': { value: 0 } }).instance)
+      const manager = new RoomManager({
+        instanceFactory: factory,
+        resource: { projectId: 'p', dataset: 'd' },
+        factory: makeFactory(),
+      })
+
+      // Create two rooms with the SAME instanceKey (the test factory
+      // returns instanceKey: 'test' for every room). They share one
+      // SanityInstance — factory called once.
+      const r1 = await manager.getOrCreate('r1')
+      const r2 = await manager.getOrCreate('r2')
+      expect(r1).not.toBeNull()
+      expect(r2).not.toBeNull()
+      expect(factory).toHaveBeenCalledTimes(1)
+      expect(manager.getInstanceKeys()).toEqual([{ key: 'test', refCount: 2 }])
+
+      // Reach into the private handleChainRot via the manager prototype
+      // to simulate two synchronous chain-rot signals for the same key
+      // in the same event-loop tick. (In production these would come
+      // from two bridges in two rooms whose .submitted() Promises
+      // rejected within the same microtask.)
+      //
+      // The cardinal property: only ONE recovery cascade should run.
+      // After the dust settles, the factory should have been called
+      // exactly 2 times total: once for the original acquire, once
+      // for the recovery's recreate.
+      // biome-ignore lint/suspicious/noExplicitAny: reaching into private for race test
+      const handleChainRot = (manager as any).handleChainRot.bind(manager) as (key: string) => Promise<void>
+      const p1 = handleChainRot('test')
+      const p2 = handleChainRot('test')
+      await Promise.all([p1, p2])
+
+      // Exactly 2 factory calls total: 1 acquire + 1 recovery recreate.
+      // If the dedup is broken, we'd see 3 (acquire + two recoveries).
+      expect(factory).toHaveBeenCalledTimes(2)
+
+      // The pool still has one entry for the key (refcount unchanged
+      // by recovery; the instance behind it was swapped).
+      expect(manager.getInstanceKeys()).toEqual([{ key: 'test', refCount: 2 }])
+
+      await manager.dispose()
+    })
+
+    it('chain-rot on key A does not touch instance for key B', async () => {
+      const factory = vi.fn(() => createMockSanity({ 'doc-1': { value: 0 } }).instance)
+
+      // Factory that returns different keys depending on roomId.
+      const multiKeyFactory: RoomFactory = {
+        async create(roomId): Promise<RoomConfig | null> {
+          return {
+            instanceKey: roomId === 'room-A' ? 'key-A' : 'key-B',
+            documents: { main: { docId: 'doc-1', mapping: testMapping } },
+            gracePeriodMs: 50,
+          }
+        },
+      }
+      const manager = new RoomManager({
+        instanceFactory: factory,
+        resource: { projectId: 'p', dataset: 'd' },
+        factory: multiKeyFactory,
+      })
+
+      await manager.getOrCreate('room-A')
+      await manager.getOrCreate('room-B')
+      expect(factory).toHaveBeenCalledTimes(2) // one per key
+      const before = manager.getInstanceKeys()
+      expect(before).toEqual(
+        expect.arrayContaining([
+          { key: 'key-A', refCount: 1 },
+          { key: 'key-B', refCount: 1 },
+        ]),
+      )
+
+      // Fire chain-rot for key-A only.
+      // biome-ignore lint/suspicious/noExplicitAny: reaching into private for the test
+      await (manager as any).handleChainRot('key-A')
+
+      // Total factory calls: 2 (initial keys) + 1 (recovery for key-A only) = 3.
+      // If chain-rot for key-A had pulled in key-B, this would be 4.
+      expect(factory).toHaveBeenCalledTimes(3)
+
+      // Both keys still in the pool. Both refCounts unchanged.
+      const after = manager.getInstanceKeys()
+      expect(after).toEqual(
+        expect.arrayContaining([
+          { key: 'key-A', refCount: 1 },
+          { key: 'key-B', refCount: 1 },
+        ]),
+      )
+
+      await manager.dispose()
+    })
+  })
 })
