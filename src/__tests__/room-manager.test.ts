@@ -30,7 +30,11 @@ function makeFactory(shouldCreate = true): RoomFactory {
   return {
     async create(): Promise<RoomConfig | null> {
       if (!shouldCreate) return null
-      return { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 50 }
+      return {
+        instanceKey: 'test',
+        documents: { main: { docId: 'doc-1', mapping: testMapping } },
+        gracePeriodMs: 50,
+      }
     },
   }
 }
@@ -38,7 +42,11 @@ function makeFactory(shouldCreate = true): RoomFactory {
 describe('RoomManager', () => {
   it('creates room via factory', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
     const room = await manager.getOrCreate('r1')
     expect(room).not.toBeNull()
     await manager.dispose()
@@ -46,7 +54,11 @@ describe('RoomManager', () => {
 
   it('returns existing room on second call', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
     const r1 = await manager.getOrCreate('r1')
     const r2 = await manager.getOrCreate('r1')
     expect(r1).toBe(r2)
@@ -56,7 +68,11 @@ describe('RoomManager', () => {
   it('deduplicates concurrent creation', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
     const createFn = vi.fn(makeFactory().create)
-    const manager = new RoomManager(mock.instance, mock.resource, { create: createFn })
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: { create: createFn },
+    })
     const [a, b] = await Promise.all([manager.getOrCreate('r1'), manager.getOrCreate('r1')])
     expect(a).toBe(b)
     expect(createFn).toHaveBeenCalledTimes(1)
@@ -65,14 +81,22 @@ describe('RoomManager', () => {
 
   it('returns null when factory rejects', async () => {
     const mock = createMockSanity()
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory(false))
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(false),
+    })
     expect(await manager.getOrCreate('r1')).toBeNull()
     await manager.dispose()
   })
 
   it('get returns existing or undefined', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
     expect(manager.get('r1')).toBeUndefined()
     await manager.getOrCreate('r1')
     expect(manager.get('r1')).toBeDefined()
@@ -82,7 +106,11 @@ describe('RoomManager', () => {
   it('removes room when it empties', async () => {
     vi.useFakeTimers()
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
     const room = await manager.getOrCreate('r1')
     const { server } = createMemoryTransportPair()
     room!.addClient(server)
@@ -94,7 +122,7 @@ describe('RoomManager', () => {
   })
 
   describe('instanceFactory ownership', () => {
-    it('throws when constructed without instance or instanceFactory', () => {
+    it('throws when constructed without instanceFactory', () => {
       // biome-ignore lint/suspicious/noExplicitAny: testing the runtime guard
       const RM = RoomManager as any
       expect(
@@ -103,7 +131,7 @@ describe('RoomManager', () => {
             resource: { projectId: 'x', dataset: 'y' },
             factory: makeFactory(),
           }),
-      ).toThrow(/instance.*instanceFactory/)
+      ).toThrow(/instanceFactory/)
     })
 
     it('manager owns SDK lifecycle when constructed with instanceFactory', async () => {
@@ -127,7 +155,11 @@ describe('RoomManager', () => {
       const factory = vi.fn(() => mockA.instance)
       const roomFactory: RoomFactory = {
         async create(): Promise<RoomConfig | null> {
-          return { documents: { main: { docId: 'silent-doc', mapping: testMapping } }, gracePeriodMs: 50 }
+          return {
+            instanceKey: 'test',
+            documents: { main: { docId: 'silent-doc', mapping: testMapping } },
+            gracePeriodMs: 50,
+          }
         },
       }
       const manager = new RoomManager({
@@ -143,7 +175,11 @@ describe('RoomManager', () => {
   it('reclaims room correctly when consumer also registers onDispose', async () => {
     vi.useFakeTimers()
     const mock = createMockSanity({ 'doc-1': { value: 42 } })
-    const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
 
     // Consumer adds their own onDispose (like the app layer does)
     const room1 = await manager.getOrCreate('r1')
@@ -201,11 +237,19 @@ describe('RoomManager', () => {
       const factory: RoomFactory = {
         async create() {
           await createGate
-          return { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 50 }
+          return {
+        instanceKey: 'test',
+        documents: { main: { docId: 'doc-1', mapping: testMapping } },
+        gracePeriodMs: 50,
+      }
         },
       }
 
-      const manager = new RoomManager(mock.instance, mock.resource, factory)
+      const manager = new RoomManager({
+        instanceFactory: () => mock.instance,
+        resource: mock.resource,
+        factory,
+      })
 
       // Start a getOrCreate that's now blocked inside the factory.
       const inflight = manager.getOrCreate('r1')
@@ -238,7 +282,11 @@ describe('RoomManager', () => {
 
     it('refuses new getOrCreate calls after dispose', async () => {
       const mock = createMockSanity({ 'doc-1': { value: 0 } })
-      const manager = new RoomManager(mock.instance, mock.resource, makeFactory())
+      const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: makeFactory(),
+    })
       await manager.dispose()
       const result = await manager.getOrCreate('r1')
       expect(result).toBeNull()
@@ -253,6 +301,10 @@ describe('RoomManager', () => {
       })
       const sdkDispose = vi.fn()
       ;(mock.instance as { dispose?: () => void }).dispose = sdkDispose
+      // Create a room so the SDK instance actually gets acquired.
+      // (Per-key pooling means instances are lazy — created on first
+      // `getOrCreate`, not at manager construction time.)
+      await manager.getOrCreate('r1')
       await manager.dispose()
       await manager.dispose()
       expect(sdkDispose).toHaveBeenCalledTimes(1)

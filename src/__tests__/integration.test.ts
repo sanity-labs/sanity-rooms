@@ -39,6 +39,7 @@ const counterMapping: DocumentMapping<Counter> = {
 async function setup(initialValue = 0) {
   const mock = createMockSanity({ 'counter-1': { value: initialValue } })
   const roomConfig: RoomConfig = {
+    instanceKey: 'test',
     documents: { counter: { docId: 'counter-1', mapping: counterMapping } },
     gracePeriodMs: 100,
   }

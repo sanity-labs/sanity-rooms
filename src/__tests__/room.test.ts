@@ -32,7 +32,7 @@ const testMapping: DocumentMapping<{ value: number }> = {
 async function makeRoom(initialValue = 0) {
   const mock = createMockSanity({ 'doc-1': { value: initialValue } })
   const room = new Room(
-    { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
+    { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
     mock.instance,
     mock.resource,
   )
@@ -63,7 +63,7 @@ describe('Room', () => {
     // Create room WITHOUT awaiting ready — connect client immediately
     const mock = createMockSanity() // no initial docs → bridge hasn't emitted yet
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
       mock.instance,
       mock.resource,
     )
@@ -113,7 +113,7 @@ describe('Room', () => {
   it('client disconnecting before ready does not crash', async () => {
     const mock = createMockSanity()
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } }, gracePeriodMs: 100 },
       mock.instance,
       mock.resource,
     )
@@ -306,7 +306,7 @@ describe('Room', () => {
 
     const mock = createMockSanity({ 'doc-1': { value: 0, refs: [] } })
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
       mock.instance,
       mock.resource,
     )
@@ -344,7 +344,7 @@ describe('Room', () => {
       const mock = createMockSanity()
       mock.setSilent('missing-main')
       const room = new Room(
-        { documents: { main: { docId: 'missing-main', mapping: testMapping } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { main: { docId: 'missing-main', mapping: testMapping } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )
@@ -361,7 +361,7 @@ describe('Room', () => {
       const mock = createMockSanity()
       mock.setSilent('late-doc')
       const room = new Room(
-        { documents: { main: { docId: 'late-doc', mapping: testMapping } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { main: { docId: 'late-doc', mapping: testMapping } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )
@@ -403,7 +403,7 @@ describe('Room', () => {
         },
       }
       const room = new Room(
-        { documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )
@@ -445,7 +445,7 @@ describe('Room', () => {
         },
       }
       const room = new Room(
-        { documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { main: { docId: 'group-1', mapping: mappingWithRefs } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )

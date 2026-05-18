@@ -32,7 +32,7 @@ const simpleMapping: DocumentMapping<{ value: number }> = {
 async function makeRoom(initialDoc: Record<string, unknown> = { value: 0 }) {
   const mock = createMockSanity({ 'doc-1': initialDoc })
   const room = new Room(
-    { documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
+    { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
     mock.instance,
     mock.resource,
   )
@@ -178,6 +178,7 @@ describe('configurable logger', () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const room = new Room(
       {
+        instanceKey: 'test',
         documents: { config: { docId: 'doc-1', mapping: simpleMapping } },
         gracePeriodMs: 100,
         logger,

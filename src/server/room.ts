@@ -46,6 +46,32 @@ export interface RoomDocConfig {
 
 export interface RoomConfig {
   documents: Record<string, RoomDocConfig>
+
+  /**
+   * REQUIRED. Identifies which SanityInstance pool this room joins.
+   * Rooms with the same `instanceKey` share a SanityInstance; rooms
+   * with different keys get isolated instances. A chain-rot on one
+   * key only recreates that key's instance — rooms on other keys are
+   * untouched.
+   *
+   * Pick a key whose scope matches your fault-isolation needs:
+   *
+   *   - One per tenant / group: `instanceKey: \`group:${inviteCode}\``
+   *     (a chain-rot in one group can't affect any other group)
+   *
+   *   - One per top-level doc: `instanceKey: \`doc:${documentId}\``
+   *     (a chain-rot in one doc can't affect any other doc)
+   *
+   *   - One per machine (NOT recommended — pre-2026-05-16 design that
+   *     made cross-tenant data loss possible): `instanceKey: 'global'`
+   *
+   * Required, no default: forgetting to set this is the kind of
+   * silent decision that turns a single rotted doc into a fleet-wide
+   * outage. The RoomManager throws at room-creation time if the
+   * factory returns a config without it.
+   */
+  instanceKey: string
+
   gracePeriodMs?: number
   /** Custom logger. Defaults to console. */
   logger?: Logger

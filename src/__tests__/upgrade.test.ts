@@ -76,9 +76,13 @@ describe('parseRoomUpgradePath', () => {
 describe('bridgeHttpUpgrade', () => {
   it('rejects 404 on path mismatch', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, {
-      async create(): Promise<RoomConfig | null> {
-        return { documents: { main: { docId: 'doc-1', mapping } } }
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: {
+        async create(): Promise<RoomConfig | null> {
+          return { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping } } }
+        },
       },
     })
     const handle = bridgeHttpUpgrade({
@@ -95,9 +99,13 @@ describe('bridgeHttpUpgrade', () => {
 
   it('rejects with status from RoomUpgradeError thrown in authorize', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, {
-      async create(): Promise<RoomConfig | null> {
-        return { documents: { main: { docId: 'doc-1', mapping } } }
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: {
+        async create(): Promise<RoomConfig | null> {
+          return { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping } } }
+        },
       },
     })
     const handle = bridgeHttpUpgrade({
@@ -115,9 +123,13 @@ describe('bridgeHttpUpgrade', () => {
 
   it('rejects 401 when authorize returns null', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 0 } })
-    const manager = new RoomManager(mock.instance, mock.resource, {
-      async create(): Promise<RoomConfig | null> {
-        return { documents: { main: { docId: 'doc-1', mapping } } }
+    const manager = new RoomManager({
+      instanceFactory: () => mock.instance,
+      resource: mock.resource,
+      factory: {
+        async create(): Promise<RoomConfig | null> {
+          return { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping } } }
+        },
       },
     })
     const handle = bridgeHttpUpgrade({
@@ -135,12 +147,12 @@ describe('bridgeHttpUpgrade', () => {
     const mock = createMockSanity()
     mock.setSilent('silent-doc')
     const manager = new RoomManager({
-      instance: mock.instance,
+      instanceFactory: () => mock.instance,
       resource: mock.resource,
       readyTimeoutMs: 30,
       factory: {
         async create(): Promise<RoomConfig | null> {
-          return { documents: { main: { docId: 'silent-doc', mapping } } }
+          return { instanceKey: 'test', documents: { main: { docId: 'silent-doc', mapping } } }
         },
       },
     })

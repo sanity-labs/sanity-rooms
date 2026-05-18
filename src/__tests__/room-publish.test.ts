@@ -101,7 +101,7 @@ async function makeRoom(mapping: DocumentMapping<any>, initialDoc: Record<string
   // want to simulate "already-published, no draft" should override _id explicitly.
   const mock = createMockSanity({ 'doc-1': { _id: 'drafts.doc-1', ...initialDoc } })
   const room = new Room(
-    { documents: { config: { docId: 'doc-1', mapping } }, gracePeriodMs: 100 },
+    { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping } }, gracePeriodMs: 100 },
     mock.instance,
     mock.resource,
   )
@@ -148,7 +148,7 @@ describe('Room.publish', () => {
     })
 
     const room = new Room(
-      { documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+      { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
       mock.instance,
       mock.resource,
     )
@@ -189,7 +189,7 @@ describe('Room.publish', () => {
     })
 
     const room = new Room(
-      { documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
+      { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
       mock.instance,
       mock.resource,
     )
@@ -225,7 +225,7 @@ describe('Room.publish', () => {
       })
 
       const room = new Room(
-        { documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )
@@ -252,7 +252,7 @@ describe('Room.publish', () => {
       })
 
       const room = new Room(
-        { documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: simpleMapping } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )
@@ -276,7 +276,7 @@ describe('Room.publish', () => {
       })
 
       const room = new Room(
-        { documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
+        { instanceKey: 'test', documents: { config: { docId: 'doc-1', mapping: refMapping } }, gracePeriodMs: 100 },
         mock.instance,
         mock.resource,
       )

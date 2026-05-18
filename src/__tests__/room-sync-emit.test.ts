@@ -100,7 +100,7 @@ describe('Room — synchronous SDK emit during subscribe()', () => {
     helpers(instance).setDoc('main-1', { _id: 'main-1', value: 7 })
 
     const room = new Room(
-      { documents: { main: { docId: 'main-1', mapping: plainMapping } }, gracePeriodMs: 50 },
+      { instanceKey: 'test', documents: { main: { docId: 'main-1', mapping: plainMapping } }, gracePeriodMs: 50 },
       instance,
       { projectId: 'p', dataset: 'd' },
     )
@@ -148,7 +148,7 @@ describe('Room — synchronous SDK emit during subscribe()', () => {
     }
 
     const room = new Room(
-      { documents: { main: { docId: 'parent-1', mapping: parentMapping } }, gracePeriodMs: 50 },
+      { instanceKey: 'test', documents: { main: { docId: 'parent-1', mapping: parentMapping } }, gracePeriodMs: 50 },
       instance,
       { projectId: 'p', dataset: 'd' },
     )
@@ -172,7 +172,7 @@ describe('Room — synchronous SDK emit during subscribe()', () => {
     const instance = sdk.createSanityInstance()
     helpers(instance).setDoc('p2', { _id: 'p2', value: 99 })
     const room = new Room(
-      { documents: { main: { docId: 'p2', mapping: plainMapping } }, gracePeriodMs: 50 },
+      { instanceKey: 'test', documents: { main: { docId: 'p2', mapping: plainMapping } }, gracePeriodMs: 50 },
       instance,
       { projectId: 'p', dataset: 'd' },
     )

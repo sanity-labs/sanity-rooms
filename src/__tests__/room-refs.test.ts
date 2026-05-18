@@ -94,6 +94,7 @@ describe('Room with refs', () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const room = new Room(
       {
+        instanceKey: 'test',
         documents: {
           main: { docId: 'doc-1', mapping: testMapping },
         },
@@ -138,7 +139,7 @@ describe('Room with refs', () => {
   it('second client receives state with items after first client mutates', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } } },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } } },
       mock.instance,
       mock.resource,
     )
@@ -175,7 +176,7 @@ describe('Room with refs', () => {
   it('mutateDoc (server-side) preserves items', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } } },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } } },
       mock.instance,
       mock.resource,
     )
@@ -206,7 +207,7 @@ describe('Room with refs', () => {
   it('own-write echo is skipped via rev tracking', async () => {
     const mock = createMockSanity({ 'doc-1': { value: 1 } })
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } } },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } } },
       mock.instance,
       mock.resource,
     )
@@ -239,6 +240,7 @@ describe('Room with refs', () => {
 
     const room = new Room(
       {
+        instanceKey: 'test',
         documents: {
           main: {
             docId: 'doc-1',
@@ -279,7 +281,7 @@ describe('Room with refs', () => {
     })
 
     const room = new Room(
-      { documents: { main: { docId: 'doc-1', mapping: testMapping } } },
+      { instanceKey: 'test', documents: { main: { docId: 'doc-1', mapping: testMapping } } },
       mock.instance,
       mock.resource,
     )
