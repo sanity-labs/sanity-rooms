@@ -492,9 +492,13 @@ export class BoardRoomManager {
   private rooms = new Map<string, BoardRoom>()
   private wss = new WebSocketServer({ noServer: true })
 
-  constructor(instance: SanityInstance, resource: SanityResource) {
+  constructor(
+    instanceFactory: () => SanityInstance,
+    resource: SanityResource,
+  ) {
     this.syncManager = new RoomManager({
-      instance, resource,
+      instanceFactory,
+      resource,
       factory: {
         async create(roomId, context) {
           const user = context as SessionUser
@@ -510,6 +514,10 @@ export class BoardRoomManager {
           if (!doc || doc.owner?._ref !== user.id) return null
 
           return {
+            // REQUIRED: identifies the SanityInstance pool this room joins.
+            // One instance per board → a chain-rot in one board can't affect
+            // any other board. See README "Instance pooling".
+            instanceKey: `board:${doc._id}`,
             documents: {
               // 'config' is just a key — name it whatever your client expects.
               // The clock app calls it 'config' too.
@@ -652,14 +660,19 @@ import { Hono } from 'hono'
 import { boardRoutes } from './routes/boards'
 import { authRoutes }  from './routes/auth'
 import { BoardRoomManager } from './rooms/room-manager'
-import { sanityInstance, sanityResource } from './sanity'
+import { createSdkInstance, sanityResource } from './sanity'
 
 const app = new Hono()
 app.route('/api', boardRoutes)
 app.route('/api/auth', authRoutes)
 
 const server = createServer(/* hono adapter */)
-const rooms  = new BoardRoomManager(sanityInstance, sanityResource)
+
+// Pass an `instanceFactory` (not a literal instance): the RoomManager
+// calls it once per unique `instanceKey` it sees, so it can mint
+// per-board instances and recreate one if its SDK chain reconciler
+// rots. See README "Instance pooling" and "Resilience".
+const rooms = new BoardRoomManager(createSdkInstance, sanityResource)
 
 server.on('upgrade', (req, socket, head) => {
   if (req.url?.startsWith('/ws/')) rooms.handleUpgrade(req, socket, head)
@@ -1325,7 +1338,11 @@ import { boardMapping } from '../src/rooms/board-mapping'
 
 it('roundtrips a sticky-note move between two clients', async () => {
   const { instance, resource } = createMockSanity({ docs: [{ _id: 'b1', _type: 'board', title: 'T', notes: [], images: [] }] })
-  const room = new Room({ documents: { config: { docId: 'b1', mapping: boardMapping } } }, instance, resource)
+  const room = new Room(
+    { instanceKey: 'test', documents: { config: { docId: 'b1', mapping: boardMapping } } },
+    instance,
+    resource,
+  )
   await room.ready
 
   const a = createMemoryTransportPair(); room.addClient(a.server)

@@ -30,15 +30,18 @@ import { WsServerTransport } from 'sanity-rooms/transport/ws-server'
 import { createSanityInstance } from '@sanity/sdk'
 
 const manager = new RoomManager({
-  // `instanceFactory` lets RoomManager own the SDK lifecycle and
-  // recover from stalls. See "Resilience" below. Pass a literal
-  // `instance:` instead if you want full control (e.g. tests).
+  // Required: called once per unique `RoomConfig.instanceKey` the manager sees.
+  // Each instance is disposed when the last room with that key disposes.
   instanceFactory: () => createSanityInstance({ projectId: 'xxx', dataset: 'production', auth: { token } }),
   resource: { projectId: 'xxx', dataset: 'production' },
   factory: {
     async create(roomId, context) {
       // context = whatever you pass to getOrCreate (e.g. authenticated user)
       return {
+        // REQUIRED: identifies the SanityInstance pool this room joins.
+        // Rooms with the same key share a SanityInstance; rooms with
+        // different keys are fully isolated. See "Instance pooling" below.
+        instanceKey: `doc:${roomId}`,
         documents: {
           config: {
             docId: roomId,
@@ -209,13 +212,17 @@ The factory's `context` argument carries auth info:
 
 ```typescript
 const manager = new RoomManager({
-  instance, resource,
+  instanceFactory,
+  resource,
   factory: {
     async create(roomId, context) {
       const user = context as SessionUser
       const doc = await sanityClient.fetch(`*[_type == "myDoc" && _id == $id][0]{ _id, owner }`, { id: roomId })
       if (!doc || doc.owner?._ref !== user.id) return null  // reject
-      return { documents: { config: { docId: doc._id, mapping } } }
+      return {
+        instanceKey: `doc:${doc._id}`,
+        documents: { config: { docId: doc._id, mapping } },
+      }
     },
   },
 })
@@ -236,8 +243,41 @@ All logging goes through a configurable `Logger` interface (default: `console`):
 ```typescript
 import type { Logger } from 'sanity-rooms'
 const logger: Logger = { error: Sentry.captureException, warn: console.warn, info: console.info, debug: () => {} }
-new RoomManager({ instance, resource, factory, logger })
+new RoomManager({ instanceFactory, resource, factory, logger })
 ```
+
+## Instance pooling
+
+> Tl;dr: **`RoomConfig.instanceKey` is required.** Choose it so a fault in one tenant's docs can't reach another tenant. Different keys = isolated SDK state machines.
+
+Every room declares an `instanceKey` (on `RoomConfig`). Rooms with the same key share one `SanityInstance` and benefit from the SDK's shared-listener multiplexing — one upstream connection serves every doc subscription on that instance. Rooms with different keys get **completely isolated** instances: independent listener sockets, independent chain reconcilers, independent buffer state.
+
+A chain-rot or other SDK fault on one key recreates only that key's instance. Rooms on every other key are untouched.
+
+| `instanceKey` shape | When to use |
+|---|---|
+| `\`tenant:${id}\`` | Multi-tenant SaaS — one upstream connection per tenant, isolates one tenant's faults from another |
+| `\`doc:${id}\`` | Heavy single-doc apps (editing one big document with many users) |
+| `'global'` | Single-tenant tools, internal back-office. Cheapest in connections; no isolation. |
+
+Cost: each unique `instanceKey` opens its own SSE listener to Sanity. At small scale this is nothing; at very high tenant count, plan for the proportional connection load.
+
+The factory return:
+
+```typescript
+{
+  async create(roomId, context) {
+    return {
+      instanceKey: `tenant:${(context as Ctx).tenantId}`,  // ← required
+      documents: { /* … */ },
+    }
+  }
+}
+```
+
+This is a deliberate breaking change from earlier versions that defaulted every room to a single shared instance. Defaulting silently to "share with everyone" produced cross-tenant data loss in production: one rotted doc cascaded across every active tenant on the machine. Forcing an explicit key catches the mistake at compile time.
+
+`manager.getInstanceKeys()` returns `[{key, refCount}]` for ops visibility.
 
 ## Resilience
 
@@ -251,20 +291,131 @@ client.onStatus((status) => setReconnecting(status !== 'connected'))
 
 `client.ready` rejects (instead of hanging) if the transport closes before the first hydration. Callers can `await client.ready` and surface a real error UI.
 
-### SDK lifecycle
+### Write outcomes: nothing fails silently
 
-Pass `instanceFactory` so the manager owns the SDK — `manager.dispose()` then disposes the SDK too.
+Every write through `bridge.write()` returns a `Promise<WriteOutcome>`:
 
 ```typescript
-new RoomManager({
-  instanceFactory: () => createSanityInstance({ projectId, dataset, auth: { token } }),
-  resource: { projectId, dataset },
-  factory: { /* … */ },
-  readyTimeoutMs: 15_000,  // default
-})
+type WriteOutcome =
+  | { kind: 'committed'; transactionId: string }
+  | { kind: 'rejected'; transactionId: string; reason: 'server' | 'chain-rot' | 'local'; message: string }
 ```
 
-### Diagnostic stall detection (opt in)
+The bridge awaits the SDK's `.submitted()` Promise — so server-side rejections (validation, ref integrity, revision conflict, rate limit, chain reconciler deadlock) all surface as typed outcomes rather than being swallowed by a `.catch()`.
+
+Internally the Room awaits the outcome before sending the mutating client an `ack`. The client's optimistic UI updates instantly on `mutate()` (synchronous local state change) — but the server confirmation is held until Sanity actually committed. No more "client thinks it locked in, Sanity has nothing."
+
+If a write rejects with `reason: 'server' | 'local'`, the Room sends `{ type: 'reject', mutationId, reason }` to the mutating client. The SyncClient runs `recomputeLocal()` and the optimistic state rolls back.
+
+### Chain-rot self-heal
+
+`@sanity/sdk`'s chain reconciler can enter an unresolvable buffer state and throw `DeadlineExceededError` after a 30-second deadline. Once that fires, the `SanityInstance` is poisoned for the affected doc — subsequent writes through the same instance, even on unrelated fields, fail with the same error. There is no SDK-side recovery API.
+
+This library handles it at the application layer:
+
+1. Bridge classifies the rejection: `/Did not resolve chain|DeadlineExceededError/` → `reason: 'chain-rot'`.
+2. Bridge fires its `onChainRot` callback up to the Room, which forwards to the RoomManager.
+3. `RoomManager.handleChainRot(instanceKey)` creates a fresh `SanityInstance` via `instanceFactory()`, swaps it into the pool for that key, and walks every Room currently using that key to re-create their bridges on the new instance (`Room.recreateBridges`). In-memory domain state is preserved across the swap.
+4. Per-key serialization + 5s cooldown prevents re-entrant recoveries and hot-loops.
+
+The voter's optimistic UI stays in place during the ~500ms recovery — bridges swap underneath them.
+
+### Self-heal replay (zero-flicker recovery)
+
+In-flight mutations whose `.submitted()` Promise rejects with chain-rot don't surface a `reject` to the client. Instead, the Room **holds them in a per-doc pending queue**, and after `recreateBridges` runs, it classifies each pending mutation against fresh server state via `DocumentMapping.classify`:
+
+```typescript
+interface DocumentMapping<TState, TSanityDoc, TSanityPatch> {
+  // … fromSanity, toSanityPatch, applyMutation, resolveRefs, fromSanityWithRefs …
+  classify?(
+    freshState: TState,
+    beforeState: TState,
+    afterState: TState,
+    patch: TSanityPatch,
+  ): Classification
+}
+
+type Classification = 'EQUAL' | 'EQUAL_TO_AFTER' | 'DIVERGED_COMPATIBLE' | 'DIVERGED_CONFLICTING'
+```
+
+The Room routes each pending mutation based on the classification:
+
+| Result | What the Room does |
+|---|---|
+| `EQUAL` (fresh matches pre-mutation state) | Replay verbatim through the new bridge |
+| `DIVERGED_COMPATIBLE` (someone else wrote, but not to our target fields) | Replay verbatim |
+| `EQUAL_TO_AFTER` (already at the goal — idempotent retry) | `ack` without re-issuing |
+| `DIVERGED_CONFLICTING` (someone else wrote our target fields) | `reject` with `reason: 'rebase-needed'` and `freshServerState` |
+
+If `classify` is unspecified, the Room defaults to `EQUAL` (blind replay). That's correct for single-writer docs but **unsafe for multi-writer docs** — implement `classify` whenever multiple sources can write the same doc.
+
+### Rebase-needed: client rebases on top of fresh state
+
+The wire-protocol reject message can carry an optional `freshServerState`:
+
+```typescript
+interface ServerRejectMsg {
+  channel: string
+  type: 'reject'
+  mutationId: string
+  reason: string
+  freshServerState?: unknown  // populated when reason starts with 'rebase-needed'
+}
+```
+
+When SyncClient receives a `reject` with `reason: 'rebase-needed'` and `freshServerState` set, it adopts the fresh server state and **rebases the unsent local diff on top of it** — same shape as the reconnect rebase below. The voter's optimistic UI flows forward instead of being wiped back.
+
+### Reconnect: local edits survive
+
+When the transport reconnects, SyncClient rebases `diff(lastSentState, localState)` on top of the freshly-hydrated `serverState`. Unsent local edits are preserved across network blips and re-flushed automatically. (Earlier versions discarded local edits on reconnect; that was the dominant source of "I tapped a star during a brief WS drop and lost it.")
+
+### WS transport: bounded outbound queue
+
+`WsClientTransport.send()` buffers outbound messages in a bounded queue (default cap 256) when the socket isn't `OPEN`. The queue drains on the next `onopen` event BEFORE SyncClient's own `onOpen` handlers run, so messages enqueued during reconnect are guaranteed to be sent before any fresh state arrives. When the cap is exceeded, the oldest message is dropped with a `console.warn` — visible signal rather than silent loss.
+
+### Graceful shutdown
+
+`gracefulShutdown` handles signal-time draining: refuse new connections, dispose every Room (which disposes every Bridge, which resolves every pending write), then exit. Hard deadline so a stuck dispose can't outrun the platform's SIGKILL grace window.
+
+```typescript
+import { gracefulShutdown } from 'sanity-rooms/server'
+
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(sig, () => {
+    void gracefulShutdown({
+      manager,
+      signal: sig,
+      hardDeadlineMs: 25_000,  // 5s buffer below Fly's 30s SIGKILL grace
+      beforeManagerDispose: () =>
+        new Promise<void>((r) => server.close(() => r())),
+    }).finally(() => process.exit(0))
+  })
+}
+```
+
+Without a drain, Node exits the moment a signal arrives, killing every in-flight `applyDocumentActions().submitted()` mid-HTTP and dropping every WebSocket connection without a `disconnect` frame. The helper is what you almost certainly want for any production deployment.
+
+### Observability
+
+The Bridge fires `onWriteOutcome(outcome)` for every committed or rejected write. Consumers wire this into their own metrics aggregator (per-Room or per-Manager) — the library doesn't own routing because it doesn't own HTTP endpoints.
+
+```typescript
+// In the factory's create():
+return {
+  instanceKey,
+  documents: { /* … */ },
+  onWriteOutcome: (outcome) => {
+    if (outcome.kind === 'committed') metrics.committed++
+    else if (outcome.reason === 'chain-rot') metrics.rejectedChainRot++
+    else if (outcome.reason === 'server') metrics.rejectedServer++
+    else metrics.rejectedLocal++
+  },
+}
+```
+
+Then expose the counters wherever your app reports metrics (HTTP scrape, Statsd, etc).
+
+### Diagnostic stall detection (opt-in)
 
 `SanityBridge` accepts `firstEmitTimeoutMs` (default `0`, off). When set, the bridge fires `onStall(reason)` if the SDK observable hasn't emitted a non-null doc in that window — useful for surfacing missing-doc / auth / schema issues with a clear reason.
 
@@ -278,7 +429,16 @@ new SanityBridge({
 
 ### Buffer cap
 
-A stalled bridge caps its pending-writes queue at `maxPendingWrites` (default 200) — oldest dropped first since the newest replace state supersedes them.
+A bridge buffering pre-ready writes caps its queue at `maxPendingWrites` (default 200) — oldest dropped first since the newest replace state supersedes them. The dropped write's `WriteOutcome` resolves with `{ kind: 'rejected', reason: 'local' }` so callers awaiting it never hang.
+
+### Test affordances
+
+Two methods on `SanityBridge` exist solely for tests that need to deterministically exercise the chain-rot path without waiting for the SDK's 30-second deadline:
+
+- `__testInflightWriteCount(): number` — count of currently-pending `applyDocumentActions().submitted()` Promises on this bridge.
+- `__testSimulateInflightChainRot(): number` — force-resolves every in-flight write as a chain-rot rejection AND fires `onChainRot`. Mirrors what a real SDK chain reconciler stall produces, but synchronously. Returns the number of writes that were rotted.
+
+Both should never be called from production code. The repro harness uses them to exercise the self-heal replay path against real Sanity.
 
 ## Custom transports
 
